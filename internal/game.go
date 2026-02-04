@@ -138,8 +138,9 @@ func (g *Game) StartSearchWithConfig(config SearchConfig) {
 				evalStr = fmt.Sprintf("%.2f", evalPawns)
 			}
 			nps := float64(stats.Nodes) / stats.Duration.Seconds()
-			fmt.Printf("Search completed: time=%v, depth=%d, qsDepth=%d, eval=%s, nodes=%d, nps=%.0f\n",
-				stats.Duration.Round(time.Millisecond), stats.DepthReached, stats.QSDepthReached, evalStr, stats.Nodes, nps)
+			qsPct := float64(stats.QSNodes) / float64(stats.Nodes) * 100
+			fmt.Printf("Search completed: time=%v, depth=%d, qsDepth=%d, eval=%s, nodes=%d (qs=%.0f%%), nps=%.0f\n",
+				stats.Duration.Round(time.Millisecond), stats.DepthReached, stats.QSDepthReached, evalStr, stats.Nodes, qsPct, nps)
 		}
 
 		g.PendingStats <- stats

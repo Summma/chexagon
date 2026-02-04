@@ -1,7 +1,7 @@
 package internal
 
 import (
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -9,14 +9,11 @@ const (
 	infinity   = 1000000
 	mateScore  = 100000
 	maxPly     = 64
-	maxQSDepth = 8
+	maxQSDepth = 4
 	nullMoveR  = 2
 )
 
 var TT = NewTranspositionTable(1 << 20)
-
-var killers [maxPly][2]Move
-var history [2][91][91]int
 
 type SearchConfig struct {
 	Depth            int
@@ -34,16 +31,52 @@ type SearchStats struct {
 	Found          bool
 	SearcherColor  Color
 	Nodes          uint64
+	QSNodes        uint64
 }
 
-var (
-	searchStartTime time.Time
-	searchTimeLimit time.Duration
-	searchStopped   atomic.Bool
-	maxQSReached    atomic.Int32
-	searchUseNNUE   bool
-	nodesSearched   atomic.Uint64
-)
+type searchState struct {
+	startTime   time.Time
+	timeLimit   time.Duration
+	stopped     bool
+	maxQS       int32
+	useNNUE     bool
+	nodes       uint64
+	qsNodes     uint64
+	killers     [maxPly][2]Move
+	history     [2][91][91]int
+	qsMoveBuf   [maxPly][64]Move
+	qsScoreBuf  [maxPly][64]int
+}
+
+var searchStatePool = sync.Pool{
+	New: func() interface{} {
+		return &searchState{}
+	},
+}
+
+func getSearchState() *searchState {
+	s := searchStatePool.Get().(*searchState)
+	s.stopped = false
+	s.maxQS = 0
+	s.nodes = 0
+	s.qsNodes = 0
+	for i := range s.killers {
+		s.killers[i][0] = Move{}
+		s.killers[i][1] = Move{}
+	}
+	for c := 0; c < 2; c++ {
+		for i := 0; i < 91; i++ {
+			for j := 0; j < 91; j++ {
+				s.history[c][i][j] = 0
+			}
+		}
+	}
+	return s
+}
+
+func putSearchState(s *searchState) {
+	searchStatePool.Put(s)
+}
 
 func posIndex(p Position) int {
 	idx := PositionToIndex(p)
@@ -53,64 +86,47 @@ func posIndex(p Position) int {
 	return idx
 }
 
-func clearKillers() {
-	for i := range killers {
-		killers[i][0] = Move{}
-		killers[i][1] = Move{}
-	}
-}
-
-func clearHistory() {
-	for c := 0; c < 2; c++ {
-		for i := 0; i < 91; i++ {
-			for j := 0; j < 91; j++ {
-				history[c][i][j] = 0
-			}
-		}
-	}
-}
-
-func storeKiller(ply int, move Move) {
+func (s *searchState) storeKiller(ply int, move Move) {
 	if ply >= maxPly {
 		return
 	}
-	if killers[ply][0].From != move.From || killers[ply][0].To != move.To {
-		killers[ply][1] = killers[ply][0]
-		killers[ply][0] = move
+	if s.killers[ply][0].From != move.From || s.killers[ply][0].To != move.To {
+		s.killers[ply][1] = s.killers[ply][0]
+		s.killers[ply][0] = move
 	}
 }
 
-func isKiller(ply int, move Move) bool {
+func (s *searchState) isKiller(ply int, move Move) bool {
 	if ply >= maxPly {
 		return false
 	}
-	return (killers[ply][0].From == move.From && killers[ply][0].To == move.To) ||
-		(killers[ply][1].From == move.From && killers[ply][1].To == move.To)
+	return (s.killers[ply][0].From == move.From && s.killers[ply][0].To == move.To) ||
+		(s.killers[ply][1].From == move.From && s.killers[ply][1].To == move.To)
 }
 
-func updateHistory(move Move, color Color, depth int) {
+func (s *searchState) updateHistory(move Move, color Color, depth int) {
 	c := 0
 	if color == Black {
 		c = 1
 	}
 	from := posIndex(move.From)
 	to := posIndex(move.To)
-	history[c][from][to] += depth * depth
-	if history[c][from][to] > 10000 {
+	s.history[c][from][to] += depth * depth
+	if s.history[c][from][to] > 10000 {
 		for i := 0; i < 91; i++ {
 			for j := 0; j < 91; j++ {
-				history[c][i][j] /= 2
+				s.history[c][i][j] /= 2
 			}
 		}
 	}
 }
 
-func getHistory(move Move, color Color) int {
+func (s *searchState) getHistory(move Move, color Color) int {
 	c := 0
 	if color == Black {
 		c = 1
 	}
-	return history[c][posIndex(move.From)][posIndex(move.To)]
+	return s.history[c][posIndex(move.From)][posIndex(move.To)]
 }
 
 func mvvLvaScore(move *Move) int {
@@ -122,7 +138,7 @@ func mvvLvaScore(move *Move) int {
 	return victimValue*10 - attackerValue
 }
 
-func orderMoves(game *Game, moves []Move, ttMove *Move, ply int) {
+func (s *searchState) orderMoves(game *Game, moves []Move, ttMove *Move, ply int) {
 	if ttMove != nil {
 		for i := range moves {
 			if moves[i].From == ttMove.From && moves[i].To == ttMove.To {
@@ -155,7 +171,7 @@ func orderMoves(game *Game, moves []Move, ttMove *Move, ply int) {
 
 	killerEnd := captureEnd
 	for i := captureEnd; i < len(moves); i++ {
-		if isKiller(ply, moves[i]) {
+		if s.isKiller(ply, moves[i]) {
 			moves[killerEnd], moves[i] = moves[i], moves[killerEnd]
 			killerEnd++
 		}
@@ -165,7 +181,7 @@ func orderMoves(game *Game, moves []Move, ttMove *Move, ply int) {
 		color := game.Turn
 		for i := killerEnd + 1; i < len(moves); i++ {
 			j := i
-			for j > killerEnd && getHistory(moves[j], color) > getHistory(moves[j-1], color) {
+			for j > killerEnd && s.getHistory(moves[j], color) > s.getHistory(moves[j-1], color) {
 				moves[j], moves[j-1] = moves[j-1], moves[j]
 				j--
 			}
@@ -175,17 +191,15 @@ func orderMoves(game *Game, moves []Move, ttMove *Move, ply int) {
 
 const aspirationWindow = 50
 
-func isTimeUp() bool {
-	if searchTimeLimit == 0 {
+func (s *searchState) isTimeUp() bool {
+	if s.timeLimit == 0 {
 		return false
 	}
-	return time.Since(searchStartTime) >= searchTimeLimit
+	return time.Since(s.startTime) >= s.timeLimit
 }
 
-// evaluateForSearch returns evaluation from side-to-move perspective
-// Uses NNUE or handcrafted based on searchUseNNUE setting
-func evaluateForSearch(game *Game) int {
-	if searchUseNNUE {
+func (s *searchState) evaluateForSearch(game *Game) int {
+	if s.useNNUE {
 		return EvaluateNNUEForSide(game, game.Turn)
 	}
 	return EvaluateForSide(game, game.Turn)
@@ -201,19 +215,17 @@ func Search(game *Game, depth int) (Move, bool) {
 
 func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 	TT.Clear()
-	clearKillers()
-	clearHistory()
 
-	searchStartTime = time.Now()
-	searchStopped.Store(false)
-	maxQSReached.Store(0)
-	nodesSearched.Store(0)
-	searchUseNNUE = config.UseNNUE
+	s := getSearchState()
+	defer putSearchState(s)
+
+	s.startTime = time.Now()
+	s.useNNUE = config.UseNNUE
 
 	if config.StopSearchByTime {
-		searchTimeLimit = config.TimeLimit
+		s.timeLimit = config.TimeLimit
 	} else {
-		searchTimeLimit = 0
+		s.timeLimit = 0
 	}
 
 	searcherColor := game.Turn
@@ -221,26 +233,28 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 	moves := GenerateAllLegalMoves(game)
 	if len(moves) == 0 {
 		return SearchStats{
-			Duration:       time.Since(searchStartTime),
+			Duration:       time.Since(s.startTime),
 			DepthReached:   0,
 			QSDepthReached: 0,
 			Found:          false,
 			SearcherColor:  searcherColor,
-			Nodes:          nodesSearched.Load(),
+			Nodes:          s.nodes,
+			QSNodes:        s.qsNodes,
 		}
 	}
 
 	if len(moves) == 1 {
 		evalScore := Evaluate(game)
 		return SearchStats{
-			Duration:       time.Since(searchStartTime),
+			Duration:       time.Since(s.startTime),
 			DepthReached:   1,
 			QSDepthReached: 0,
 			BestMove:       moves[0],
 			Score:          evalScore,
 			Found:          true,
 			SearcherColor:  searcherColor,
-			Nodes:          nodesSearched.Load(),
+			Nodes:          s.nodes,
+			QSNodes:        s.qsNodes,
 		}
 	}
 
@@ -254,7 +268,7 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 	}
 
 	for d := 1; d <= maxDepth; d++ {
-		if config.StopSearchByTime && isTimeUp() {
+		if config.StopSearchByTime && s.isTimeUp() {
 			break
 		}
 
@@ -265,21 +279,21 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 			alpha := score - aspirationWindow
 			beta := score + aspirationWindow
 
-			iterBestMove, iterScore = searchRootWithWindow(game, moves, d, alpha, beta)
+			iterBestMove, iterScore = s.searchRootWithWindow(game, moves, d, alpha, beta)
 
-			if searchStopped.Load() {
+			if s.stopped {
 				break
 			}
 
 			if iterScore <= alpha || iterScore >= beta {
-				iterBestMove, iterScore = searchRootWithWindow(game, moves, d, -infinity, infinity)
-				if searchStopped.Load() {
+				iterBestMove, iterScore = s.searchRootWithWindow(game, moves, d, -infinity, infinity)
+				if s.stopped {
 					break
 				}
 			}
 		} else {
-			iterBestMove, iterScore = searchRootWithWindow(game, moves, d, -infinity, infinity)
-			if searchStopped.Load() {
+			iterBestMove, iterScore = s.searchRootWithWindow(game, moves, d, -infinity, infinity)
+			if s.stopped {
 				break
 			}
 		}
@@ -302,18 +316,19 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 	}
 
 	return SearchStats{
-		Duration:       time.Since(searchStartTime),
+		Duration:       time.Since(s.startTime),
 		DepthReached:   depthReached,
-		QSDepthReached: int(maxQSReached.Load()),
+		QSDepthReached: int(s.maxQS),
 		BestMove:       bestMove,
 		Score:          displayScore,
 		Found:          true,
 		SearcherColor:  searcherColor,
-		Nodes:          nodesSearched.Load(),
+		Nodes:          s.nodes,
+		QSNodes:        s.qsNodes,
 	}
 }
 
-func searchRootWithWindow(game *Game, moves []Move, depth int, alpha, beta int) (Move, int) {
+func (s *searchState) searchRootWithWindow(game *Game, moves []Move, depth int, alpha, beta int) (Move, int) {
 	bestMove := moves[0]
 	best := -infinity
 
@@ -323,11 +338,11 @@ func searchRootWithWindow(game *Game, moves []Move, depth int, alpha, beta int) 
 
 		var score int
 		if i == 0 {
-			score = -negamax(game, -beta, -alpha, depth-1, 1, true)
+			score = -s.negamax(game, -beta, -alpha, depth-1, 1, true)
 		} else {
-			score = -negamax(game, -alpha-1, -alpha, depth-1, 1, true)
+			score = -s.negamax(game, -alpha-1, -alpha, depth-1, 1, true)
 			if score > alpha && score < beta {
-				score = -negamax(game, -beta, -alpha, depth-1, 1, true)
+				score = -s.negamax(game, -beta, -alpha, depth-1, 1, true)
 			}
 		}
 
@@ -347,11 +362,11 @@ func searchRootWithWindow(game *Game, moves []Move, depth int, alpha, beta int) 
 	return bestMove, best
 }
 
-func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
-	nodesSearched.Add(1)
+func (s *searchState) negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
+	s.nodes++
 
-	if ply <= 2 && searchTimeLimit > 0 && isTimeUp() {
-		searchStopped.Store(true)
+	if ply <= 2 && s.timeLimit > 0 && s.isTimeUp() {
+		s.stopped = true
 		return 0
 	}
 
@@ -384,7 +399,7 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 	inCheck := IsKingInCheck(game, game.Turn)
 
 	if depth <= 0 {
-		return quiesce(game, alpha, beta, 0)
+		return s.quiesce(game, alpha, beta, 0)
 	}
 
 	if canNull && !inCheck && depth >= nullMoveR+1 && beta < mateScore-maxPly {
@@ -395,7 +410,7 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 		game.EPPosition = nil
 		game.Hash ^= zobristSideToMove
 
-		score := -negamax(game, -beta, -beta+1, depth-1-nullMoveR, ply+1, false)
+		score := -s.negamax(game, -beta, -beta+1, depth-1-nullMoveR, ply+1, false)
 
 		game.Hash = hashBefore
 		game.EPPosition = epBefore
@@ -420,12 +435,12 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 		return 0
 	}
 
-	orderMoves(game, moves, ttMove, ply)
+	s.orderMoves(game, moves, ttMove, ply)
 
 	var futilityBase int
 	canFutilityPrune := false
 	if depth <= 3 && !inCheck && alpha < mateScore-maxPly && alpha > -mateScore+maxPly {
-		futilityBase = evaluateForSearch(game)
+		futilityBase = s.evaluateForSearch(game)
 		futilityMargin := depth * 150
 		canFutilityPrune = futilityBase+futilityMargin <= alpha
 	}
@@ -434,13 +449,13 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 	bestScore := -infinity
 
 	for i := range moves {
-		if searchStopped.Load() {
+		if s.stopped {
 			return alpha
 		}
 
 		move := &moves[i]
 
-		if canFutilityPrune && i > 0 && !move.IsCapture && !move.IsPromotion && !isKiller(ply, *move) {
+		if canFutilityPrune && i > 0 && !move.IsCapture && !move.IsPromotion && !s.isKiller(ply, *move) {
 			continue
 		}
 
@@ -454,17 +469,17 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 			newDepth = depth
 		}
 
-		if i >= 4 && depth >= 3 && !move.IsCapture && !isKiller(ply, *move) && !inCheck {
-			score = -negamax(game, -alpha-1, -alpha, newDepth-1, ply+1, true)
-			if score > alpha && !searchStopped.Load() {
-				score = -negamax(game, -beta, -alpha, newDepth, ply+1, true)
+		if i >= 4 && depth >= 3 && !move.IsCapture && !s.isKiller(ply, *move) && !inCheck {
+			score = -s.negamax(game, -alpha-1, -alpha, newDepth-1, ply+1, true)
+			if score > alpha && !s.stopped {
+				score = -s.negamax(game, -beta, -alpha, newDepth, ply+1, true)
 			}
 		} else if i == 0 {
-			score = -negamax(game, -beta, -alpha, newDepth, ply+1, true)
+			score = -s.negamax(game, -beta, -alpha, newDepth, ply+1, true)
 		} else {
-			score = -negamax(game, -alpha-1, -alpha, newDepth, ply+1, true)
-			if score > alpha && score < beta && !searchStopped.Load() {
-				score = -negamax(game, -beta, -alpha, newDepth, ply+1, true)
+			score = -s.negamax(game, -alpha-1, -alpha, newDepth, ply+1, true)
+			if score > alpha && score < beta && !s.stopped {
+				score = -s.negamax(game, -beta, -alpha, newDepth, ply+1, true)
 			}
 		}
 
@@ -478,8 +493,8 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 
 		if score >= beta {
 			if !move.IsCapture {
-				storeKiller(ply, *move)
-				updateHistory(*move, game.Turn, depth)
+				s.storeKiller(ply, *move)
+				s.updateHistory(*move, game.Turn, depth)
 			}
 			TT.Store(game.Hash, depth, beta, TTLowerBound, bestMove)
 			return beta
@@ -501,14 +516,15 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 	return alpha
 }
 
-func quiesce(game *Game, alpha, beta, qsDepth int) int {
-	nodesSearched.Add(1)
+func (s *searchState) quiesce(game *Game, alpha, beta, qsDepth int) int {
+	s.nodes++
+	s.qsNodes++
 
-	if current := maxQSReached.Load(); int32(qsDepth) > current {
-		maxQSReached.Store(int32(qsDepth))
+	if int32(qsDepth) > s.maxQS {
+		s.maxQS = int32(qsDepth)
 	}
 
-	standPat := evaluateForSearch(game)
+	standPat := s.evaluateForSearch(game)
 
 	if standPat >= beta {
 		return beta
@@ -521,64 +537,103 @@ func quiesce(game *Game, alpha, beta, qsDepth int) int {
 		return alpha
 	}
 
+	if standPat+1000 < alpha {
+		return alpha
+	}
+
+	turn := game.Turn
+	numMoves := 0
+	moves := &s.qsMoveBuf[qsDepth]
+	scores := &s.qsScoreBuf[qsDepth]
+
 	for _, piece := range game.Board {
-		if piece == nil || piece.Color != game.Turn {
+		if piece == nil || piece.Color != turn {
 			continue
 		}
+
+		pieceType := piece.Type
+		attackerVal := pieceValues[pieceType]
 
 		plainMoves := piece.GenerateMoves(game)
 		for _, pm := range plainMoves {
 			target := GetPiece(&game.Board, pm.To)
+			isEP := false
+
 			if target == nil {
-				if piece.Type == Pawn && game.EPPosition != nil && pm.To.Equals(*game.EPPosition) {
+				if pieceType == Pawn && game.EPPosition != nil && pm.To.Equals(*game.EPPosition) {
+					isEP = true
+					if turn == White {
+						target = GetPiece(&game.Board, pm.To.AddReturn(DirDown))
+					} else {
+						target = GetPiece(&game.Board, pm.To.AddReturn(DirUp))
+					}
 				} else {
 					continue
 				}
-			} else if target.Color == piece.Color {
+			} else if target.Color == turn {
 				continue
 			}
 
-			if target != nil && PieceValue(target)+200 < alpha-standPat {
+			targetVal := pieceValues[target.Type]
+
+			if standPat+targetVal+300 < alpha {
 				continue
 			}
 
-			move := Move{
-				From:       pm.From,
-				To:         pm.To,
-				PieceType:  piece.Type,
-				PieceColor: piece.Color,
-				IsCapture:  true,
-				ToPiece:    target,
-				IsValid:    true,
+			if attackerVal > targetVal+100 && pieceType != Queen && pieceType != Pawn {
+				continue
 			}
 
-			if piece.Type == Pawn && game.EPPosition != nil && pm.To.Equals(*game.EPPosition) {
-				move.IsEnPassant = true
-				if piece.Color == White {
-					move.ToPiece = GetPiece(&game.Board, pm.To.AddReturn(DirDown))
-				} else {
-					move.ToPiece = GetPiece(&game.Board, pm.To.AddReturn(DirUp))
+			if numMoves < 64 {
+				moves[numMoves] = Move{
+					From:        pm.From,
+					To:          pm.To,
+					PieceType:   pieceType,
+					PieceColor:  turn,
+					IsCapture:   true,
+					ToPiece:     target,
+					IsEnPassant: isEP,
+					IsValid:     true,
 				}
+				scores[numMoves] = targetVal*10 - attackerVal
+				numMoves++
 			}
+		}
+	}
 
-			undo := game.MakeMove(move)
-			if IsKingInCheck(game, piece.Color) {
-				game.UnmakeMove(move, undo)
-				continue
+	for i := 0; i < numMoves; i++ {
+		bestIdx := i
+		bestScore := scores[i]
+		for j := i + 1; j < numMoves; j++ {
+			if scores[j] > bestScore {
+				bestIdx = j
+				bestScore = scores[j]
 			}
-			game.Turn = game.Turn.Other()
+		}
+		if bestIdx != i {
+			moves[i], moves[bestIdx] = moves[bestIdx], moves[i]
+			scores[i], scores[bestIdx] = scores[bestIdx], scores[i]
+		}
 
-			score := -quiesce(game, -beta, -alpha, qsDepth+1)
+		move := &moves[i]
 
-			game.Turn = game.Turn.Other()
-			game.UnmakeMove(move, undo)
+		undo := game.MakeMove(*move)
+		if IsKingInCheck(game, turn) {
+			game.UnmakeMove(*move, undo)
+			continue
+		}
+		game.Turn = turn.Other()
 
-			if score >= beta {
-				return beta
-			}
-			if score > alpha {
-				alpha = score
-			}
+		score := -s.quiesce(game, -beta, -alpha, qsDepth+1)
+
+		game.Turn = turn
+		game.UnmakeMove(*move, undo)
+
+		if score >= beta {
+			return beta
+		}
+		if score > alpha {
+			alpha = score
 		}
 	}
 
