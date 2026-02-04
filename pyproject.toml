@@ -1,0 +1,20 @@
+[project]
+name = "chexagon"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Alejandro Pinto",email = "pinto.alex05@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "torch (>=2.10.0,<3.0.0)",
+    "numpy (>=2.4.2,<3.0.0)",
+    "tqdm (>=4.67.2,<5.0.0)",
+    "wandb (>=0.24.1,<0.25.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

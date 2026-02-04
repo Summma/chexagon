@@ -524,3 +524,44 @@ func EvaluateForSide(game *Game, color Color) int {
 	}
 	return score
 }
+
+// Global NNUE model - loaded once at startup
+var nnueModel *Model
+
+func init() {
+	model := LoadModel("models/prob-512-128-32-d4.json")
+	nnueModel = &model
+}
+
+// EvaluateNNUE returns evaluation in centipawns using the NNUE model
+// Positive = White advantage, Negative = Black advantage
+func EvaluateNNUE(game *Game) int {
+	stm, nstm := BoardToHalfKPFeaturesAlloc(game)
+	winProb := nnueModel.Predict(stm, nstm)
+
+	// Convert probability to centipawns
+	// 0.5 = 0cp, 1.0 = +1000cp, 0.0 = -1000cp (approximate)
+	// Using a sigmoid-inverse-like scaling
+	cp := int((winProb - 0.5) * 2000)
+
+	// From side-to-move perspective, convert to White's perspective
+	if game.Turn == Black {
+		cp = -cp
+	}
+
+	return cp
+}
+
+// EvaluateNNUEForSide returns NNUE evaluation from the given color's perspective
+func EvaluateNNUEForSide(game *Game, color Color) int {
+	score := EvaluateNNUE(game)
+	if color == Black {
+		return -score
+	}
+	return score
+}
+
+// GetNNUEModel returns the global NNUE model for direct access (e.g., incremental updates)
+func GetNNUEModel() *Model {
+	return nnueModel
+}

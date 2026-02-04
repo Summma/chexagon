@@ -22,6 +22,7 @@ type SearchConfig struct {
 	Depth            int
 	StopSearchByTime bool
 	TimeLimit        time.Duration
+	UseNNUE          bool
 }
 
 type SearchStats struct {
@@ -32,6 +33,7 @@ type SearchStats struct {
 	Score          int
 	Found          bool
 	SearcherColor  Color
+	Nodes          uint64
 }
 
 var (
@@ -39,6 +41,8 @@ var (
 	searchTimeLimit time.Duration
 	searchStopped   atomic.Bool
 	maxQSReached    atomic.Int32
+	searchUseNNUE   bool
+	nodesSearched   atomic.Uint64
 )
 
 func posIndex(p Position) int {
@@ -178,6 +182,15 @@ func isTimeUp() bool {
 	return time.Since(searchStartTime) >= searchTimeLimit
 }
 
+// evaluateForSearch returns evaluation from side-to-move perspective
+// Uses NNUE or handcrafted based on searchUseNNUE setting
+func evaluateForSearch(game *Game) int {
+	if searchUseNNUE {
+		return EvaluateNNUEForSide(game, game.Turn)
+	}
+	return EvaluateForSide(game, game.Turn)
+}
+
 func Search(game *Game, depth int) (Move, bool) {
 	stats := SearchWithConfig(game, SearchConfig{
 		Depth:            depth,
@@ -194,6 +207,8 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 	searchStartTime = time.Now()
 	searchStopped.Store(false)
 	maxQSReached.Store(0)
+	nodesSearched.Store(0)
+	searchUseNNUE = config.UseNNUE
 
 	if config.StopSearchByTime {
 		searchTimeLimit = config.TimeLimit
@@ -211,6 +226,7 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 			QSDepthReached: 0,
 			Found:          false,
 			SearcherColor:  searcherColor,
+			Nodes:          nodesSearched.Load(),
 		}
 	}
 
@@ -224,6 +240,7 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 			Score:          evalScore,
 			Found:          true,
 			SearcherColor:  searcherColor,
+			Nodes:          nodesSearched.Load(),
 		}
 	}
 
@@ -292,6 +309,7 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 		Score:          displayScore,
 		Found:          true,
 		SearcherColor:  searcherColor,
+		Nodes:          nodesSearched.Load(),
 	}
 }
 
@@ -330,6 +348,8 @@ func searchRootWithWindow(game *Game, moves []Move, depth int, alpha, beta int) 
 }
 
 func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
+	nodesSearched.Add(1)
+
 	if ply <= 2 && searchTimeLimit > 0 && isTimeUp() {
 		searchStopped.Store(true)
 		return 0
@@ -405,7 +425,7 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 	var futilityBase int
 	canFutilityPrune := false
 	if depth <= 3 && !inCheck && alpha < mateScore-maxPly && alpha > -mateScore+maxPly {
-		futilityBase = EvaluateForSide(game, game.Turn)
+		futilityBase = evaluateForSearch(game)
 		futilityMargin := depth * 150
 		canFutilityPrune = futilityBase+futilityMargin <= alpha
 	}
@@ -482,11 +502,13 @@ func negamax(game *Game, alpha, beta, depth, ply int, canNull bool) int {
 }
 
 func quiesce(game *Game, alpha, beta, qsDepth int) int {
+	nodesSearched.Add(1)
+
 	if current := maxQSReached.Load(); int32(qsDepth) > current {
 		maxQSReached.Store(int32(qsDepth))
 	}
 
-	standPat := EvaluateForSide(game, game.Turn)
+	standPat := evaluateForSearch(game)
 
 	if standPat >= beta {
 		return beta

@@ -20,6 +20,8 @@ type Game struct {
 	BlackValue       int
 	WhiteUseTime     bool
 	BlackUseTime     bool
+	WhiteUseNNUE     bool
+	BlackUseNNUE     bool
 	Board            Board
 	ScreenWidth      int
 	ScreenHeight     int
@@ -50,6 +52,8 @@ func NewGame() *Game {
 		BlackValue:      5,
 		WhiteUseTime:    false,
 		BlackUseTime:    false,
+		WhiteUseNNUE:    true,
+		BlackUseNNUE:    true,
 		ScreenWidth:     1280,
 		ScreenHeight:    960,
 		Board:           [91]*Piece{},
@@ -133,8 +137,9 @@ func (g *Game) StartSearchWithConfig(config SearchConfig) {
 			} else {
 				evalStr = fmt.Sprintf("%.2f", evalPawns)
 			}
-			fmt.Printf("Search completed: time=%v, depth=%d, qsDepth=%d, eval=%s\n",
-				stats.Duration.Round(time.Millisecond), stats.DepthReached, stats.QSDepthReached, evalStr)
+			nps := float64(stats.Nodes) / stats.Duration.Seconds()
+			fmt.Printf("Search completed: time=%v, depth=%d, qsDepth=%d, eval=%s, nodes=%d, nps=%.0f\n",
+				stats.Duration.Round(time.Millisecond), stats.DepthReached, stats.QSDepthReached, evalStr, stats.Nodes, nps)
 		}
 
 		g.PendingStats <- stats
@@ -168,6 +173,7 @@ func (g *Game) Update() error {
 				ctx.Slider(&g.WhiteValue, 0, 10, 1)
 			}
 			ctx.Checkbox(&g.WhiteUseTime, "White: Use Time")
+			ctx.Checkbox(&g.WhiteUseNNUE, "White: Use NNUE")
 
 			ctx.Text("")
 
@@ -186,6 +192,7 @@ func (g *Game) Update() error {
 				ctx.Slider(&g.BlackValue, 0, 10, 1)
 			}
 			ctx.Checkbox(&g.BlackUseTime, "Black: Use Time")
+			ctx.Checkbox(&g.BlackUseNNUE, "Black: Use NNUE")
 		})
 		return nil
 	})
@@ -221,15 +228,29 @@ func (g *Game) Update() error {
 	if g.PromotingPawn == nil && !g.Thinking && !g.GameOver {
 		if g.Turn == White && g.WhiteValue > 0 {
 			if g.WhiteUseTime {
-				g.StartSearchWithTime(time.Duration(g.WhiteValue) * time.Millisecond)
+				g.StartSearchWithConfig(SearchConfig{
+					StopSearchByTime: true,
+					TimeLimit:        time.Duration(g.WhiteValue) * time.Millisecond,
+					UseNNUE:          g.WhiteUseNNUE,
+				})
 			} else {
-				g.StartSearch(g.WhiteValue)
+				g.StartSearchWithConfig(SearchConfig{
+					Depth:   g.WhiteValue,
+					UseNNUE: g.WhiteUseNNUE,
+				})
 			}
 		} else if g.Turn == Black && g.BlackValue > 0 {
 			if g.BlackUseTime {
-				g.StartSearchWithTime(time.Duration(g.BlackValue) * time.Millisecond)
+				g.StartSearchWithConfig(SearchConfig{
+					StopSearchByTime: true,
+					TimeLimit:        time.Duration(g.BlackValue) * time.Millisecond,
+					UseNNUE:          g.BlackUseNNUE,
+				})
 			} else {
-				g.StartSearch(g.BlackValue)
+				g.StartSearchWithConfig(SearchConfig{
+					Depth:   g.BlackValue,
+					UseNNUE: g.BlackUseNNUE,
+				})
 			}
 		}
 	}
@@ -335,7 +356,11 @@ func (g *Game) drawEvaluation(screen *ebiten.Image) {
 	yOffset := y + 45
 
 	if g.WhiteValue > 0 {
-		ebitenutil.DebugPrintAt(screen, "White Engine:", x, yOffset)
+		whiteEvalType := "HCE"
+		if g.WhiteUseNNUE {
+			whiteEvalType = "NNUE"
+		}
+		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("White Engine (%s):", whiteEvalType), x, yOffset)
 		if g.WhiteSearchStats != nil {
 			evalStr := formatEval(g.WhiteSearchStats.Score)
 			ebitenutil.DebugPrintAt(screen, fmt.Sprintf("  Eval: %s, Depth: %d, QS: %d, Time: %v",
@@ -350,7 +375,11 @@ func (g *Game) drawEvaluation(screen *ebiten.Image) {
 	}
 
 	if g.BlackValue > 0 {
-		ebitenutil.DebugPrintAt(screen, "Black Engine:", x, yOffset)
+		blackEvalType := "HCE"
+		if g.BlackUseNNUE {
+			blackEvalType = "NNUE"
+		}
+		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Black Engine (%s):", blackEvalType), x, yOffset)
 		if g.BlackSearchStats != nil {
 			evalStr := formatEval(g.BlackSearchStats.Score)
 			ebitenutil.DebugPrintAt(screen, fmt.Sprintf("  Eval: %s, Depth: %d, QS: %d, Time: %v",

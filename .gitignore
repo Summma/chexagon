@@ -31,3 +31,6 @@ go.work.sum
 # Mine
 cmd/*
 .DS_Store
+training_data*
+models/*
+__pycache__
