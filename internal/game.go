@@ -71,8 +71,8 @@ func NewGame() *Game {
 		BlackValue:      5,
 		WhiteUseTime:    false,
 		BlackUseTime:    false,
-		WhiteUseNNUE:    true,
-		BlackUseNNUE:    true,
+		WhiteUseNNUE:    false,
+		BlackUseNNUE:    false,
 		ScreenWidth:     1280,
 		ScreenHeight:    960,
 		Board:           [91]*Piece{},
@@ -272,7 +272,9 @@ func (g *Game) Update() error {
 				ctx.Slider(&g.WhiteValue, 0, 10, 1)
 			}
 			ctx.Checkbox(&g.WhiteUseTime, "White: Use Time")
-			ctx.Checkbox(&g.WhiteUseNNUE, "White: Use NNUE")
+			if NNUEAvailable {
+				ctx.Checkbox(&g.WhiteUseNNUE, "White: Use NNUE")
+			}
 
 			ctx.Text("")
 
@@ -291,7 +293,9 @@ func (g *Game) Update() error {
 				ctx.Slider(&g.BlackValue, 0, 10, 1)
 			}
 			ctx.Checkbox(&g.BlackUseTime, "Black: Use Time")
-			ctx.Checkbox(&g.BlackUseNNUE, "Black: Use NNUE")
+			if NNUEAvailable {
+				ctx.Checkbox(&g.BlackUseNNUE, "Black: Use NNUE")
+			}
 		})
 		return nil
 	})

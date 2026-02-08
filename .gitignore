@@ -34,3 +34,6 @@ cmd/*
 training_data*
 models/*
 __pycache__
+wasm_exec.js
+main.wasm
+deploy/*

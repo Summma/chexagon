@@ -1,11 +1,7 @@
 package internal
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
 	"math"
-	"os"
 )
 
 
@@ -85,67 +81,13 @@ func (a *NNUEAccumulator) Copy(dim int) *NNUEAccumulator {
 }
 
 func LoadModel(path string) Model {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("Failed to read json file: %v", err)
+	return Model{
+		EmbDim:    256,
+		bufConcat: make([]float32, 512),
+		bufL0:     make([]float32, 128),
+		bufL2:     make([]float32, 32),
+		bufL4:     make([]float32, 1),
 	}
-
-	var raw struct {
-		ModelType string            `json:"model_type"`
-		Weights   map[string]Weight `json:"weights"`
-	}
-
-	err = json.Unmarshal(data, &raw)
-	if err != nil {
-		log.Fatalf("Failed to unmarshal json data: %v", err)
-	}
-
-
-	emb := raw.Weights["emb.weight"]
-	l0w := raw.Weights["layers.0.weight"]
-	l0b := raw.Weights["layers.0.bias"]
-	l2w := raw.Weights["layers.2.weight"]
-	l2b := raw.Weights["layers.2.bias"]
-	l4w := raw.Weights["layers.4.weight"]
-	l4b := raw.Weights["layers.4.bias"]
-
-
-	embQ := make([]int16, len(emb.Data))
-	for i, v := range emb.Data {
-		q := int32(v * quantScale)
-		if q > 32767 {
-			q = 32767
-		} else if q < -32768 {
-			q = -32768
-		}
-		embQ[i] = int16(q)
-	}
-
-	model := Model{
-		ModelType:    raw.ModelType,
-		EmbWeightQ:   embQ,
-		EmbDim:       emb.Shape[1],
-		Layer0Weight: l0w.Data,
-		Layer0Bias:   l0b.Data,
-		Layer0Out:    l0w.Shape[0],
-		Layer2Weight: l2w.Data,
-		Layer2Bias:   l2b.Data,
-		Layer2Out:    l2w.Shape[0],
-		Layer4Weight: l4w.Data,
-		Layer4Bias:   l4b.Data,
-		bufConcat:    make([]float32, emb.Shape[1]*2),
-		bufL0:        make([]float32, l0w.Shape[0]),
-		bufL2:        make([]float32, l2w.Shape[0]),
-		bufL4:        make([]float32, 1),
-	}
-
-	fmt.Printf("Loaded NNUE model: %s\n", path)
-	fmt.Printf("  Embedding: %d x %d (quantized to int16)\n", emb.Shape[0], emb.Shape[1])
-	fmt.Printf("  Layer 0: %d x %d\n", l0w.Shape[0], l0w.Shape[1])
-	fmt.Printf("  Layer 2: %d x %d\n", l2w.Shape[0], l2w.Shape[1])
-	fmt.Printf("  Layer 4: %d x %d\n", l4w.Shape[0], l4w.Shape[1])
-
-	return model
 }
 
 
