@@ -11,6 +11,15 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 )
 
+
+type HistoryEntry struct {
+	Move      Move
+	BoardSnap [91]*Piece
+	WhiteKing Position
+	BlackKing Position
+	Turn      Color
+}
+
 type Game struct {
 	debugui          debugui.DebugUI
 	HexagonSize      int
@@ -32,8 +41,10 @@ type Game struct {
 	EPColor          *Color
 	PromotingPawn    *Piece
 	PromotionPos     Position
+	PromotionMove    Move
 	Turn             Color
 	Hash             uint64
+	PawnHash         uint64
 	PositionHistory  map[uint64]int
 	Thinking         bool
 	GameOver         bool
@@ -41,6 +52,14 @@ type Game struct {
 	LastSearchStats  *SearchStats
 	WhiteSearchStats *SearchStats
 	BlackSearchStats *SearchStats
+
+
+	MoveHistory    []HistoryEntry
+	InitialBoard   [91]*Piece
+	InitialWKing   Position
+	InitialBKing   Position
+	ViewIndex      int
+	ViewingHistory bool
 }
 
 func NewGame() *Game {
@@ -62,12 +81,91 @@ func NewGame() *Game {
 		Turn:            White,
 		PositionHistory: make(map[uint64]int),
 		PendingStats:    make(chan SearchStats, 1),
+		MoveHistory:     make([]HistoryEntry, 0),
+		ViewIndex:       -1,
+		ViewingHistory:  false,
 	}
 }
 
 func (g *Game) InitHash() {
 	g.Hash = g.ComputeHash()
+	g.PawnHash = g.ComputePawnHash()
 	g.PositionHistory[g.Hash] = 1
+
+
+	g.InitialWKing = g.WhiteKing
+	g.InitialBKing = g.BlackKing
+	for i, piece := range g.Board {
+		if piece != nil {
+			pieceCopy := *piece
+			g.InitialBoard[i] = &pieceCopy
+		}
+	}
+}
+
+
+func (g *Game) RecordMove(move Move) {
+	var boardSnap [91]*Piece
+	for i, piece := range g.Board {
+		if piece != nil {
+			pieceCopy := *piece
+			boardSnap[i] = &pieceCopy
+		}
+	}
+
+	entry := HistoryEntry{
+		Move:      move,
+		BoardSnap: boardSnap,
+		WhiteKing: g.WhiteKing,
+		BlackKing: g.BlackKing,
+		Turn:      g.Turn,
+	}
+	g.MoveHistory = append(g.MoveHistory, entry)
+
+
+	g.ViewingHistory = false
+	g.ViewIndex = -1
+}
+
+
+func (g *Game) GetViewBoard() [91]*Piece {
+	if !g.ViewingHistory || g.ViewIndex < 0 {
+		return g.Board
+	}
+	if g.ViewIndex == 0 {
+		return g.InitialBoard
+	}
+
+	return g.MoveHistory[g.ViewIndex-1].BoardSnap
+}
+
+
+
+func (g *Game) NavigateHistory(delta int) {
+	if len(g.MoveHistory) == 0 {
+		return
+	}
+
+
+
+	newIndex := g.ViewIndex + delta
+
+
+	if newIndex < 0 {
+		newIndex = 0
+	}
+	if newIndex > len(g.MoveHistory) {
+		newIndex = len(g.MoveHistory)
+	}
+
+	if newIndex == len(g.MoveHistory) {
+
+		g.ViewingHistory = false
+		g.ViewIndex = -1
+	} else {
+		g.ViewingHistory = true
+		g.ViewIndex = newIndex
+	}
 }
 
 func (g *Game) IsRepetition() bool {
@@ -212,6 +310,7 @@ func (g *Game) Update() error {
 		}
 		if stats.Found {
 			g.MakeMove(stats.BestMove)
+			g.RecordMove(stats.BestMove)
 			g.Turn = g.Turn.Other()
 		} else {
 			if !g.GameOver {
@@ -260,6 +359,42 @@ func (g *Game) Update() error {
 		return nil
 	}
 
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyLeft) {
+		g.NavigateHistory(-1)
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyRight) {
+		g.NavigateHistory(1)
+	}
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyHome) {
+		if len(g.MoveHistory) > 0 {
+			g.ViewingHistory = true
+			g.ViewIndex = 0
+		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) {
+		g.ViewingHistory = false
+		g.ViewIndex = -1
+	}
+
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyA) && !g.Thinking {
+		useNNUE := true
+		if g.Turn == White {
+			useNNUE = g.WhiteUseNNUE
+		} else {
+			useNNUE = g.BlackUseNNUE
+		}
+		depth := 4
+		AnalyzePosition(g, depth, useNNUE)
+	}
+
+
+	if g.ViewingHistory {
+		return nil
+	}
+
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		x, y := ebiten.CursorPosition()
 
@@ -278,6 +413,11 @@ func (g *Game) Update() error {
 					Queen:  "queen",
 				}[*selectedType]
 				g.PromotingPawn.Image = "assets/pieces-basic-png/" + colorStr + "-" + typeStr + ".png"
+
+
+				g.PromotionMove.PromotionType = selectedType
+				g.RecordMove(g.PromotionMove)
+
 				g.PromotingPawn = nil
 				g.Turn = g.Turn.Other()
 			}
@@ -307,7 +447,9 @@ func (g *Game) Update() error {
 				if move.IsPromotion {
 					g.PromotingPawn = GetPiece(&g.Board, clickedPosition)
 					g.PromotionPos = clickedPosition
+					g.PromotionMove = move
 				} else {
+					g.RecordMove(move)
 					g.Turn = g.Turn.Other()
 				}
 			}
@@ -321,21 +463,29 @@ func (g *Game) Update() error {
 func (g *Game) Draw(screen *ebiten.Image) {
 	DrawBoard(screen, float64(g.HexagonSize), 640, 480, byte(g.ColorIntensity))
 
-	if g.SelectedPiece != nil {
+
+	if g.SelectedPiece != nil && !g.ViewingHistory {
 		g.drawMoveIndicators(screen)
 	}
 
-	for _, piece := range g.Board {
+
+	viewBoard := g.GetViewBoard()
+	for _, piece := range viewBoard {
 		if piece != nil {
 			piece.Draw(screen, g)
 		}
 	}
 
-	if g.PromotingPawn != nil {
+	if g.PromotingPawn != nil && !g.ViewingHistory {
 		g.drawPromotionUI(screen)
 	}
 
 	g.drawEvaluation(screen)
+
+
+	if g.ViewingHistory || len(g.MoveHistory) > 0 {
+		g.drawHistoryIndicator(screen)
+	}
 
 	g.debugui.Draw(screen)
 }
@@ -402,6 +552,36 @@ func formatEval(score int) string {
 	return fmt.Sprintf("%.2f", evalPawns)
 }
 
+func (g *Game) drawHistoryIndicator(screen *ebiten.Image) {
+	x := g.ScreenWidth - 250
+	y := g.ScreenHeight - 80
+
+	totalMoves := len(g.MoveHistory)
+	currentMove := totalMoves
+
+	if g.ViewingHistory {
+		currentMove = g.ViewIndex
+	}
+
+
+	positionText := fmt.Sprintf("Move: %d / %d", currentMove, totalMoves)
+	ebitenutil.DebugPrintAt(screen, positionText, x, y)
+
+
+	if g.ViewingHistory {
+		ebitenutil.DebugPrintAt(screen, "[Viewing History]", x, y+15)
+	}
+	ebitenutil.DebugPrintAt(screen, "< > arrows to navigate", x, y+30)
+
+
+	if g.ViewingHistory && g.ViewIndex > 0 {
+		lastMove := g.MoveHistory[g.ViewIndex-1].Move
+		moveStr := fmt.Sprintf("Last: %s %v->%v",
+			lastMove.PieceType, lastMove.From, lastMove.To)
+		ebitenutil.DebugPrintAt(screen, moveStr, x, y+45)
+	}
+}
+
 func (g *Game) drawMoveIndicators(screen *ebiten.Image) {
 	if g.SelectedPiece == nil {
 		return
@@ -411,7 +591,7 @@ func (g *Game) drawMoveIndicators(screen *ebiten.Image) {
 
 	smallRadius := float64(g.HexagonSize) * 0.25
 
-	inscribedRadius := float64(g.HexagonSize) * 0.866 // sqrt(3)/2 ≈ 0.866
+	inscribedRadius := float64(g.HexagonSize) * 0.866
 	ringThickness := float64(g.HexagonSize) * 0.12
 
 	ox := float64(g.ScreenWidth) / 2.0

@@ -38,27 +38,27 @@ func SetupStartingPosition(game *Game) {
 		}
 	}
 
-	// White pieces (bottom)
-	// King
+
+
 	addPiece(King, White, Position{1, -5, 4})
 
-	// Queen
+
 	addPiece(Queen, White, Position{-1, -4, 5})
 
-	// Bishops (3)
+
 	addPiece(Bishop, White, Position{0, -5, 5})
 	addPiece(Bishop, White, Position{0, -4, 4})
 	addPiece(Bishop, White, Position{0, -3, 3})
 
-	// Knights (2)
+
 	addPiece(Knight, White, Position{-2, -3, 5})
 	addPiece(Knight, White, Position{2, -5, 3})
 
-	// Rooks (2)
+
 	addPiece(Rook, White, Position{-3, -2, 5})
 	addPiece(Rook, White, Position{3, -5, 2})
 
-	// Pawns (9)
+
 	addPiece(Pawn, White, Position{-4, -1, 5})
 	addPiece(Pawn, White, Position{-3, -1, 4})
 	addPiece(Pawn, White, Position{-2, -1, 3})
@@ -69,27 +69,27 @@ func SetupStartingPosition(game *Game) {
 	addPiece(Pawn, White, Position{3, -4, 1})
 	addPiece(Pawn, White, Position{4, -5, 1})
 
-	// Black pieces (top) - mirrored from white (negate all coordinates)
-	// King
+
+
 	addPiece(King, Black, Position{1, 4, -5})
 
-	// Queen
+
 	addPiece(Queen, Black, Position{-1, 5, -4})
 
-	// Bishops (3)
+
 	addPiece(Bishop, Black, Position{0, 5, -5})
 	addPiece(Bishop, Black, Position{0, 4, -4})
 	addPiece(Bishop, Black, Position{0, 3, -3})
 
-	// Knights (2)
+
 	addPiece(Knight, Black, Position{2, 3, -5})
 	addPiece(Knight, Black, Position{-2, 5, -3})
 
-	// Rooks (2)
+
 	addPiece(Rook, Black, Position{3, 2, -5})
 	addPiece(Rook, Black, Position{-3, 5, -2})
 
-	// Pawns (9)
+
 	addPiece(Pawn, Black, Position{4, 1, -5})
 	addPiece(Pawn, Black, Position{3, 1, -4})
 	addPiece(Pawn, Black, Position{2, 1, -3})
@@ -107,7 +107,7 @@ func DrawBoard(screen *ebiten.Image, sideLength, ox, oy float64, intensity byte)
 	color := 0
 	palette := RoseHexPalette(intensity)
 
-	// Top 5 rows of hexa-board
+
 	for i := 0; i < 5; i++ {
 		DrawHexagon(screen, curr, sideLength, ox, oy, palette[color%3])
 		for j := 0; j < i; j++ {
@@ -124,7 +124,7 @@ func DrawBoard(screen *ebiten.Image, sideLength, ox, oy float64, intensity byte)
 		color++
 	}
 
-	// Middle 11 rows of hexa-board
+
 	for i := 0; i < 11; i++ {
 		DrawHexagon(screen, curr, sideLength, ox, oy, palette[color%3])
 		for j := 0; j < (5 - i%2); j++ {
@@ -149,7 +149,7 @@ func DrawBoard(screen *ebiten.Image, sideLength, ox, oy float64, intensity byte)
 		color++
 	}
 
-	// Bottom 5 rows of hexa-board
+
 	for i := 4; i >= 0; i-- {
 		DrawHexagon(screen, curr, sideLength, ox, oy, palette[color%3])
 		for j := 0; j < i; j++ {

@@ -101,6 +101,27 @@ type Piece struct {
 	Moved    bool
 }
 
+
+
+var plainMovePool = make(chan []PlainMove, 32)
+
+func getPlainMoveBuffer() []PlainMove {
+	select {
+	case buf := <-plainMovePool:
+		return buf[:0]
+	default:
+		return make([]PlainMove, 0, 32)
+	}
+}
+
+func putPlainMoveBuffer(buf []PlainMove) {
+	select {
+	case plainMovePool <- buf:
+	default:
+
+	}
+}
+
 func GenerateAllMoves(game *Game) []PlainMove {
 	moves := []PlainMove{}
 
@@ -129,6 +150,26 @@ func (p Piece) GenerateMoves(game *Game) []PlainMove {
 		return GenerateKingMoves(p, game)
 	default:
 		return []PlainMove{}
+	}
+}
+
+
+func (p Piece) GenerateMovesInto(game *Game, out []PlainMove) []PlainMove {
+	switch p.Type {
+	case Pawn:
+		return GeneratePawnMovesInto(p, game, out)
+	case Bishop:
+		return GenerateBishopMovesInto(p, game, out)
+	case Rook:
+		return GenerateRookMovesInto(p, game, out)
+	case Knight:
+		return GenerateKnightMovesInto(p, game, out)
+	case Queen:
+		return GenerateQueenMovesInto(p, game, out)
+	case King:
+		return GenerateKingMovesInto(p, game, out)
+	default:
+		return out
 	}
 }
 
@@ -405,6 +446,172 @@ func GenerateKingMoves(piece Piece, game *Game) []PlainMove {
 		}
 		if GetPiece(&game.Board, pos) != nil {
 			if GetPiece(&game.Board, pos).Color != piece.Color {
+				out = append(out, PlainMove{from, pos, nil})
+			}
+			continue
+		}
+		out = append(out, PlainMove{from, pos, nil})
+	}
+
+	return out
+}
+
+
+
+func GeneratePawnMovesInto(piece Piece, game *Game, out []PlainMove) []PlainMove {
+	from := piece.Position
+	var dir, diagLeftDir, diagRightDir Direction
+	if piece.Color == Black {
+		dir = DirDown
+		diagLeftDir = DirDownLeft
+		diagRightDir = DirDownRight
+	} else {
+		dir = DirUp
+		diagLeftDir = DirUpLeft
+		diagRightDir = DirUpRight
+	}
+
+	oneForward := from.AddReturn(dir)
+
+	if oneForward.InBoard() && GetPiece(&game.Board, oneForward) == nil {
+		if IsPromotionSquare(oneForward, piece.Color) {
+			for i := range promotionTypes {
+				out = append(out, PlainMove{from, oneForward, &promotionTypes[i]})
+			}
+		} else {
+			out = append(out, PlainMove{from, oneForward, nil})
+
+			if !piece.Moved {
+				twoForward := oneForward.AddReturn(dir)
+				if twoForward.InBoard() && GetPiece(&game.Board, twoForward) == nil {
+					out = append(out, PlainMove{from, twoForward, nil})
+				}
+			}
+		}
+	}
+
+	leftCapture := from.AddReturn(diagLeftDir)
+	if leftCapture.InBoard() {
+		if target := GetPiece(&game.Board, leftCapture); target != nil && target.Color != piece.Color {
+			if IsPromotionSquare(leftCapture, piece.Color) {
+				for i := range promotionTypes {
+					out = append(out, PlainMove{from, leftCapture, &promotionTypes[i]})
+				}
+			} else {
+				out = append(out, PlainMove{from, leftCapture, nil})
+			}
+		}
+	}
+
+	rightCapture := from.AddReturn(diagRightDir)
+	if rightCapture.InBoard() {
+		if target := GetPiece(&game.Board, rightCapture); target != nil && target.Color != piece.Color {
+			if IsPromotionSquare(rightCapture, piece.Color) {
+				for i := range promotionTypes {
+					out = append(out, PlainMove{from, rightCapture, &promotionTypes[i]})
+				}
+			} else {
+				out = append(out, PlainMove{from, rightCapture, nil})
+			}
+		}
+	}
+
+	if game.EPPosition != nil && *game.EPColor != piece.Color {
+		if leftCapture.Equals(*game.EPPosition) {
+			out = append(out, PlainMove{from, leftCapture, nil})
+		} else if rightCapture.Equals(*game.EPPosition) {
+			out = append(out, PlainMove{from, rightCapture, nil})
+		}
+	}
+
+	return out
+}
+
+func GenerateBishopMovesInto(piece Piece, game *Game, out []PlainMove) []PlainMove {
+	from := piece.Position
+
+	for _, dir := range bishopDirs {
+		dirOne, dirTwo := dir[0], dir[1]
+		for mag := 1; ; mag++ {
+			pos := from.AddVectorsReturn(Vector{dirOne, mag}, Vector{dirTwo, mag})
+			if !pos.InBoard() {
+				break
+			}
+			if p := GetPiece(&game.Board, pos); p != nil {
+				if p.Color != piece.Color {
+					out = append(out, PlainMove{from, pos, nil})
+				}
+				break
+			}
+			out = append(out, PlainMove{from, pos, nil})
+		}
+	}
+
+	return out
+}
+
+func GenerateRookMovesInto(piece Piece, game *Game, out []PlainMove) []PlainMove {
+	from := piece.Position
+
+	for _, dir := range rookDirs {
+		for mag := 1; ; mag++ {
+			pos := from.AddVectorReturn(Vector{dir, mag})
+			if !pos.InBoard() {
+				break
+			}
+			if p := GetPiece(&game.Board, pos); p != nil {
+				if p.Color != piece.Color {
+					out = append(out, PlainMove{from, pos, nil})
+				}
+				break
+			}
+			out = append(out, PlainMove{from, pos, nil})
+		}
+	}
+
+	return out
+}
+
+func GenerateKnightMovesInto(piece Piece, game *Game, out []PlainMove) []PlainMove {
+	from := piece.Position
+
+	for _, offset := range knightOffsets {
+		pos := from.AddVectorsReturn(offset[0], offset[1])
+		if !pos.InBoard() {
+			continue
+		}
+		if p := GetPiece(&game.Board, pos); p != nil {
+			if p.Color != piece.Color {
+				out = append(out, PlainMove{from, pos, nil})
+			}
+			continue
+		}
+		out = append(out, PlainMove{from, pos, nil})
+	}
+
+	return out
+}
+
+func GenerateQueenMovesInto(piece Piece, game *Game, out []PlainMove) []PlainMove {
+	out = GenerateRookMovesInto(piece, game, out)
+	out = GenerateBishopMovesInto(piece, game, out)
+	return out
+}
+
+func GenerateKingMovesInto(piece Piece, game *Game, out []PlainMove) []PlainMove {
+	from := piece.Position
+
+	for _, dirs := range kingOffsets {
+		pos := from
+		for _, d := range dirs {
+			pos = pos.AddReturn(d)
+		}
+
+		if !pos.InBoard() {
+			continue
+		}
+		if p := GetPiece(&game.Board, pos); p != nil {
+			if p.Color != piece.Color {
 				out = append(out, PlainMove{from, pos, nil})
 			}
 			continue

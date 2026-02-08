@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -9,7 +10,7 @@ const (
 	infinity   = 1000000
 	mateScore  = 100000
 	maxPly     = 64
-	maxQSDepth = 4
+	maxQSDepth = 8
 	nullMoveR  = 2
 )
 
@@ -35,17 +36,17 @@ type SearchStats struct {
 }
 
 type searchState struct {
-	startTime   time.Time
-	timeLimit   time.Duration
-	stopped     bool
-	maxQS       int32
-	useNNUE     bool
-	nodes       uint64
-	qsNodes     uint64
-	killers     [maxPly][2]Move
-	history     [2][91][91]int
-	qsMoveBuf   [maxPly][64]Move
-	qsScoreBuf  [maxPly][64]int
+	startTime  time.Time
+	timeLimit  time.Duration
+	stopped    bool
+	maxQS      int32
+	useNNUE    bool
+	nodes      uint64
+	qsNodes    uint64
+	killers    [maxPly][2]Move
+	history    [2][91][91]int
+	qsMoveBuf  [maxPly][64]Move
+	qsScoreBuf [maxPly][64]int
 }
 
 var searchStatePool = sync.Pool{
@@ -213,6 +214,61 @@ func Search(game *Game, depth int) (Move, bool) {
 	return stats.BestMove, stats.Found
 }
 
+
+func AnalyzePosition(game *Game, depth int, useNNUE bool) {
+	fmt.Println("\n=== Position Analysis ===")
+	fmt.Printf("Turn: %v\n", game.Turn)
+
+
+	var whiteMat, blackMat int
+	for _, piece := range game.Board {
+		if piece != nil {
+			val := pieceValues[piece.Type]
+			if piece.Color == White {
+				whiteMat += val
+			} else {
+				blackMat += val
+			}
+		}
+	}
+	fmt.Printf("Material: White=%d, Black=%d (diff=%+d)\n", whiteMat, blackMat, whiteMat-blackMat)
+
+
+	hceScore := Evaluate(game)
+	fmt.Printf("HCE eval (white perspective): %.2f\n", float64(hceScore)/100.0)
+
+	nnueScore := EvaluateNNUE(game)
+	fmt.Printf("NNUE eval (white perspective): %.2f\n", float64(nnueScore)/100.0)
+
+
+	TT.Clear()
+	s := getSearchState()
+	defer putSearchState(s)
+
+	s.startTime = time.Now()
+	s.useNNUE = useNNUE
+	s.timeLimit = 0
+
+	moves := GenerateAllLegalMoves(game)
+	fmt.Printf("\nLegal moves: %d\n", len(moves))
+
+	if len(moves) == 0 {
+		if IsKingInCheck(game, game.Turn) {
+			fmt.Println("CHECKMATE!")
+		} else {
+			fmt.Println("STALEMATE!")
+		}
+		return
+	}
+
+	fmt.Printf("\nSearching at depth %d...\n", depth)
+	fmt.Println("Move scores (from side to move perspective):")
+
+	s.searchRootWithWindowDebug(game, moves, depth, -infinity, infinity, true)
+
+	fmt.Println("=========================\n")
+}
+
 func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 	TT.Clear()
 
@@ -329,6 +385,10 @@ func SearchWithConfig(game *Game, config SearchConfig) SearchStats {
 }
 
 func (s *searchState) searchRootWithWindow(game *Game, moves []Move, depth int, alpha, beta int) (Move, int) {
+	return s.searchRootWithWindowDebug(game, moves, depth, alpha, beta, false)
+}
+
+func (s *searchState) searchRootWithWindowDebug(game *Game, moves []Move, depth int, alpha, beta int, debug bool) (Move, int) {
 	bestMove := moves[0]
 	best := -infinity
 
@@ -348,6 +408,14 @@ func (s *searchState) searchRootWithWindow(game *Game, moves []Move, depth int, 
 
 		game.Turn = game.Turn.Other()
 		game.UnmakeMove(move, undo)
+
+		if debug {
+			captureStr := ""
+			if move.IsCapture {
+				captureStr = " (capture)"
+			}
+			fmt.Printf("  %s %v->%v: %.2f%s\n", move.PieceType, move.From, move.To, float64(score)/100.0, captureStr)
+		}
 
 		if score > best {
 			best = score

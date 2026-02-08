@@ -65,6 +65,7 @@ type MoveUndo struct {
 	PieceTypeBefore  PieceType
 	PieceImageBefore string
 	HashBefore       uint64
+	PawnHashBefore   uint64
 }
 
 func (g *Game) MakeMove(move Move) MoveUndo {
@@ -78,6 +79,25 @@ func (g *Game) MakeMove(move Move) MoveUndo {
 		PieceTypeBefore:  piece.Type,
 		PieceImageBefore: piece.Image,
 		HashBefore:       g.Hash,
+		PawnHashBefore:   g.PawnHash,
+	}
+
+
+	fromIdx := positionToIndex[move.From]
+	toIdx := positionToIndex[move.To]
+
+
+	if move.PieceType == Pawn {
+		g.PawnHash ^= pawnZobrist[piece.Color][fromIdx]
+
+		if !move.IsPromotion {
+			g.PawnHash ^= pawnZobrist[piece.Color][toIdx]
+		}
+	}
+
+
+	if undo.CapturedPiece != nil && undo.CapturedPiece.Type == Pawn {
+		g.PawnHash ^= pawnZobrist[undo.CapturedPiece.Color][toIdx]
 	}
 
 	SetPiece(&g.Board, move.From, nil)
@@ -103,6 +123,9 @@ func (g *Game) MakeMove(move Move) MoveUndo {
 	if move.IsEnPassant && move.ToPiece != nil {
 		undo.CapturedPiece = move.ToPiece
 		undo.CapturedPos = move.ToPiece.Position
+
+		epIdx := positionToIndex[move.ToPiece.Position]
+		g.PawnHash ^= pawnZobrist[move.ToPiece.Color][epIdx]
 		SetPiece(&g.Board, move.ToPiece.Position, nil)
 	}
 
@@ -170,6 +193,7 @@ func (g *Game) UnmakeMove(move Move, undo MoveUndo) {
 	g.EPColor = undo.EPColorBefore
 
 	g.Hash = undo.HashBefore
+	g.PawnHash = undo.PawnHashBefore
 }
 
 func GenerateAllLegalMoves(game *Game) []Move {
@@ -183,12 +207,15 @@ func GenerateAllLegalMovesInto(game *Game, out []Move) []Move {
 		out = out[:0]
 	}
 
+
+	var plainMoveBuf [64]PlainMove
+
 	for _, piece := range game.Board {
 		if piece == nil || piece.Color != game.Turn {
 			continue
 		}
 
-		plainMoves := piece.GenerateMoves(game)
+		plainMoves := piece.GenerateMovesInto(game, plainMoveBuf[:0])
 		for _, pm := range plainMoves {
 			move := Move{
 				From:          pm.From,
@@ -237,14 +264,71 @@ func GenerateAllLegalMovesInto(game *Game, out []Move) []Move {
 }
 
 func IsSquareAttacked(game *Game, pos Position, byColor Color) bool {
-	for _, piece := range game.Board {
-		if piece == nil || piece.Color != byColor {
-			continue
+	targetIdx := PositionToIndex(pos)
+
+
+
+
+
+	var pawnDirs [2]Direction
+	if byColor == White {
+
+		pawnDirs = [2]Direction{DirDownLeft, DirDownRight}
+	} else {
+
+		pawnDirs = [2]Direction{DirUpLeft, DirUpRight}
+	}
+	for _, dir := range pawnDirs {
+		attackerPos := pos.AddReturn(dir)
+		if attackerPos.InBoard() {
+			if piece := GetPiece(&game.Board, attackerPos); piece != nil && piece.Color == byColor && piece.Type == Pawn {
+				return true
+			}
 		}
-		if piece.AttacksSquare(game, pos) {
+	}
+
+
+	for _, srcIdx := range knightAttacks[targetIdx] {
+		piece := game.Board[srcIdx]
+		if piece != nil && piece.Color == byColor && piece.Type == Knight {
 			return true
 		}
 	}
+
+
+	for _, srcIdx := range kingAttacks[targetIdx] {
+		piece := game.Board[srcIdx]
+		if piece != nil && piece.Color == byColor && piece.Type == King {
+			return true
+		}
+	}
+
+
+	for dirIdx := 0; dirIdx < 6; dirIdx++ {
+		for _, srcIdx := range rookRays[targetIdx][dirIdx] {
+			piece := game.Board[srcIdx]
+			if piece != nil {
+				if piece.Color == byColor && (piece.Type == Rook || piece.Type == Queen) {
+					return true
+				}
+				break
+			}
+		}
+	}
+
+
+	for dirIdx := 0; dirIdx < 6; dirIdx++ {
+		for _, srcIdx := range bishopRays[targetIdx][dirIdx] {
+			piece := game.Board[srcIdx]
+			if piece != nil {
+				if piece.Color == byColor && (piece.Type == Bishop || piece.Type == Queen) {
+					return true
+				}
+				break
+			}
+		}
+	}
+
 	return false
 }
 
@@ -257,12 +341,15 @@ func IsKingInCheck(game *Game, color Color) bool {
 }
 
 func HasLegalMoves(game *Game, color Color) bool {
+
+	var movesBuf [64]PlainMove
+
 	for _, piece := range game.Board {
 		if piece == nil || piece.Color != color {
 			continue
 		}
 
-		moves := piece.GenerateMoves(game)
+		moves := piece.GenerateMovesInto(game, movesBuf[:0])
 
 		for _, plainMove := range moves {
 			move := Move{

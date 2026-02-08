@@ -1,34 +1,35 @@
 package internal
 
-var pieceValues = map[PieceType]int{
-	Pawn:   100,
-	Knight: 300,
-	Bishop: 350,
-	Rook:   500,
-	Queen:  900,
-	King:   0,
+
+var pieceValues = [6]int{
+	100,
+	300,
+	350,
+	500,
+	900,
+	0,
 }
 
 const (
-	passedPawnBonus        = 20 // Base bonus for passed pawn
-	passedPawnAdvanceBonus = 5  // Additional bonus per rank advanced
-	connectedPassedBonus   = 15 // Bonus for connected passed pawns
-	doubledPawnPenalty     = 15 // Penalty for doubled pawns
-	isolatedPawnPenalty    = 10 // Penalty for isolated pawns
+	passedPawnBonus        = 20
+	passedPawnAdvanceBonus = 5
+	connectedPassedBonus   = 15
+	doubledPawnPenalty     = 15
+	isolatedPawnPenalty    = 10
 )
 
 const (
-	pawnShieldBonus     = 10 // Bonus per pawn shielding the king
-	kingAttackerPenalty = 8  // Penalty per enemy piece attacking king zone
-	openFileNearKingPen = 15 // Penalty for open file adjacent to king
-	kingExposedPenalty  = 20 // Penalty if king has few nearby defenders
+	pawnShieldBonus     = 10
+	kingAttackerPenalty = 8
+	openFileNearKingPen = 15
+	kingExposedPenalty  = 20
 )
 
 const (
-	knightMobilityBonus = 4 // Knights benefit most from mobility
-	bishopMobilityBonus = 3 // Bishops are long-range
-	rookMobilityBonus   = 2 // Rooks on open files
-	queenMobilityBonus  = 1 // Queen mobility less important (already powerful)
+	knightMobilityBonus = 4
+	bishopMobilityBonus = 3
+	rookMobilityBonus   = 2
+	queenMobilityBonus  = 1
 )
 
 func PieceValue(piece *Piece) int {
@@ -158,12 +159,66 @@ func hasConnectedPassedPawn(pawn *Piece, game *Game, passedPawns map[*Piece]bool
 
 func getPawnAdvancement(pawn *Piece) int {
 	if pawn.Color == White {
-		return pawn.Position.Y + 1 // Ranges roughly from 0 to 6
+		return pawn.Position.Y + 1
 	}
-	return -pawn.Position.Y + 1 // Ranges roughly from 0 to 6
+	return -pawn.Position.Y + 1
+}
+
+
+type pawnCacheEntry struct {
+	hash  uint64
+	score int
+	valid bool
+}
+
+const pawnCacheSize = 1 << 16
+
+var pawnCache [pawnCacheSize]pawnCacheEntry
+var pawnZobrist [2][91]uint64
+
+
+type kingSafetyCacheEntry struct {
+	hash  uint64
+	score int
+	valid bool
+}
+
+const kingSafetyCacheSize = 1 << 16
+
+var kingSafetyCache [kingSafetyCacheSize]kingSafetyCacheEntry
+
+func init() {
+
+	r := uint64(0x50415753545255)
+	for c := 0; c < 2; c++ {
+		for sq := 0; sq < 91; sq++ {
+			r ^= r << 13
+			r ^= r >> 7
+			r ^= r << 17
+			pawnZobrist[c][sq] = r
+		}
+	}
+
+}
+
+
+func (g *Game) ComputePawnHash() uint64 {
+	var hash uint64
+	for idx, piece := range g.Board {
+		if piece != nil && piece.Type == Pawn {
+			hash ^= pawnZobrist[piece.Color][idx]
+		}
+	}
+	return hash
 }
 
 func evaluatePawnStructure(game *Game) int {
+
+	pawnHash := game.PawnHash
+	cacheIdx := pawnHash & (pawnCacheSize - 1)
+	if entry := &pawnCache[cacheIdx]; entry.valid && entry.hash == pawnHash {
+		return entry.score
+	}
 	score := 0
 
 	passedPawns := make(map[*Piece]bool)
@@ -208,62 +263,30 @@ func evaluatePawnStructure(game *Game) int {
 		}
 	}
 
+
+	pawnCache[cacheIdx] = pawnCacheEntry{hash: pawnHash, score: score, valid: true}
+
 	return score
 }
 
-func getKingZone(kingPos Position) []Position {
-	zone := make([]Position, 0, 13)
-	zone = append(zone, kingPos)
 
-	allDirs := [][]Direction{
-		{DirUp},
-		{DirDown},
-		{DirUpLeft},
-		{DirUpRight},
-		{DirDownLeft},
-		{DirDownRight},
-		{DirUp, DirUpRight},
-		{DirDownRight, DirUpRight},
-		{DirDownRight, DirDown},
-		{DirDownLeft, DirDown},
-		{DirDownLeft, DirUpLeft},
-		{DirUp, DirUpLeft},
-	}
-
-	for _, dirs := range allDirs {
-		pos := kingPos
-		for _, d := range dirs {
-			pos = pos.AddReturn(d)
-		}
-		if pos.InBoard() {
-			zone = append(zone, pos)
-		}
-	}
-
-	return zone
+func getKingZoneIndices(kingIdx int) []int {
+	return kingZones[kingIdx]
 }
 
-func countPawnShield(kingPos Position, color Color, game *Game) int {
+func countPawnShield(kingIdx int, color Color, game *Game) int {
 	count := 0
 
-	var shieldDirs []Direction
+	var shieldSquares []int
 	if color == White {
-		shieldDirs = []Direction{DirUp, DirUpLeft, DirUpRight}
+		shieldSquares = pawnShieldSquaresWhite[kingIdx]
 	} else {
-		shieldDirs = []Direction{DirDown, DirDownLeft, DirDownRight}
+		shieldSquares = pawnShieldSquaresBlack[kingIdx]
 	}
 
-	for _, dir := range shieldDirs {
-		for dist := 1; dist <= 2; dist++ {
-			pos := kingPos
-			for i := 0; i < dist; i++ {
-				pos = pos.AddReturn(dir)
-			}
-			if pos.InBoard() {
-				if piece := GetPiece(&game.Board, pos); piece != nil && piece.Type == Pawn && piece.Color == color {
-					count++
-				}
-			}
+	for _, sq := range shieldSquares {
+		if piece := game.Board[sq]; piece != nil && piece.Type == Pawn && piece.Color == color {
+			count++
 		}
 	}
 
@@ -272,22 +295,41 @@ func countPawnShield(kingPos Position, color Color, game *Game) int {
 
 func countKingZoneAttackers(kingPos Position, enemyColor Color, game *Game) int {
 	attackers := 0
+	kx, ky, kz := kingPos.X, kingPos.Y, kingPos.Z
 
 	for _, piece := range game.Board {
 		if piece == nil || piece.Color != enemyColor {
 			continue
 		}
-		if piece.Type == Pawn || piece.Type == King {
+		pt := piece.Type
+		if pt == Pawn || pt == King {
 			continue
 		}
 
-		dist := hexDistance(piece.Position, kingPos)
 
-		if piece.Type == Queen && dist <= 4 {
-			attackers += 2 // Queen is more dangerous
-		} else if (piece.Type == Rook || piece.Type == Bishop) && dist <= 3 {
-			attackers++
-		} else if piece.Type == Knight && dist <= 3 {
+		dx := piece.Position.X - kx
+		dy := piece.Position.Y - ky
+		dz := piece.Position.Z - kz
+		if dx < 0 {
+			dx = -dx
+		}
+		if dy < 0 {
+			dy = -dy
+		}
+		if dz < 0 {
+			dz = -dz
+		}
+		dist := dx
+		if dy > dist {
+			dist = dy
+		}
+		if dz > dist {
+			dist = dz
+		}
+
+		if pt == Queen && dist <= 4 {
+			attackers += 2
+		} else if dist <= 3 {
 			attackers++
 		}
 	}
@@ -295,34 +337,11 @@ func countKingZoneAttackers(kingPos Position, enemyColor Color, game *Game) int 
 	return attackers
 }
 
-func hexDistance(a, b Position) int {
-	dx := a.X - b.X
-	dy := a.Y - b.Y
-	dz := a.Z - b.Z
-	if dx < 0 {
-		dx = -dx
-	}
-	if dy < 0 {
-		dy = -dy
-	}
-	if dz < 0 {
-		dz = -dz
-	}
-	max := dx
-	if dy > max {
-		max = dy
-	}
-	if dz > max {
-		max = dz
-	}
-	return max
-}
-
-func countDefenders(kingZone []Position, color Color, game *Game) int {
+func countDefenders(kingZoneIndices []int, color Color, game *Game) int {
 	defenders := 0
 
-	for _, pos := range kingZone {
-		if piece := GetPiece(&game.Board, pos); piece != nil && piece.Color == color && piece.Type != King {
+	for _, idx := range kingZoneIndices {
+		if piece := game.Board[idx]; piece != nil && piece.Color == color && piece.Type != King {
 			defenders++
 		}
 	}
@@ -332,17 +351,23 @@ func countDefenders(kingZone []Position, color Color, game *Game) int {
 
 func hasOpenFileNearKing(kingPos Position, color Color, game *Game) bool {
 
-	filesToCheck := []Position{kingPos}
 
-	adjDirs := []Direction{DirUpLeft, DirUpRight, DirDownLeft, DirDownRight}
+	var filesToCheck [5]Position
+	fileCount := 1
+	filesToCheck[0] = kingPos
+
+
+	adjDirs := [4]Direction{DirUpLeft, DirUpRight, DirDownLeft, DirDownRight}
 	for _, dir := range adjDirs {
 		adjPos := kingPos.AddReturn(dir)
 		if adjPos.InBoard() {
-			filesToCheck = append(filesToCheck, adjPos)
+			filesToCheck[fileCount] = adjPos
+			fileCount++
 		}
 	}
 
-	for _, filePos := range filesToCheck {
+	for i := 0; i < fileCount; i++ {
+		filePos := filesToCheck[i]
 		hasPawn := false
 		for checkPos := filePos; checkPos.InBoard(); checkPos = checkPos.AddReturn(DirUp) {
 			if piece := GetPiece(&game.Board, checkPos); piece != nil && piece.Type == Pawn {
@@ -359,7 +384,7 @@ func hasOpenFileNearKing(kingPos Position, color Color, game *Game) bool {
 			}
 		}
 		if !hasPawn {
-			return true // Found an open file
+			return true
 		}
 	}
 
@@ -369,7 +394,7 @@ func hasOpenFileNearKing(kingPos Position, color Color, game *Game) bool {
 func evaluateMobility(game *Game) int {
 	score := 0
 
-	for _, piece := range game.Board {
+	for idx, piece := range game.Board {
 		if piece == nil {
 			continue
 		}
@@ -379,22 +404,19 @@ func evaluateMobility(game *Game) int {
 		case Knight:
 			dist := centerDistance(piece.Position)
 			if dist >= 4 {
-				mobilityBonus = -15 // Knight on rim is dim
+				mobilityBonus = -15
 			} else if dist >= 3 {
 				mobilityBonus = -5
 			}
 
 		case Bishop:
 			blocked := 0
-			for _, dir := range bishopDirs {
-				pos := piece.Position.AddVectorsReturn(Vector{dir[0], 1}, Vector{dir[1], 1})
-				if pos.InBoard() {
-					if blocker := GetPiece(&game.Board, pos); blocker != nil && blocker.Type == Pawn && blocker.Color == piece.Color {
-						blocked++
-					}
+			for _, adjIdx := range bishopAdjacent[idx] {
+				if blocker := game.Board[adjIdx]; blocker != nil && blocker.Type == Pawn && blocker.Color == piece.Color {
+					blocked++
 				}
 			}
-			mobilityBonus = -blocked * 5 // Penalty for each blocking pawn
+			mobilityBonus = -blocked * 5
 
 		case Rook:
 			hasOpenFile := true
@@ -431,12 +453,23 @@ func evaluateMobility(game *Game) int {
 }
 
 func evaluateKingSafety(game *Game) int {
+
+	cacheIdx := game.Hash & (kingSafetyCacheSize - 1)
+	if entry := &kingSafetyCache[cacheIdx]; entry.valid && entry.hash == game.Hash {
+		return entry.score
+	}
+
 	score := 0
 
-	whiteKingZone := getKingZone(game.WhiteKing)
-	whitePawnShield := countPawnShield(game.WhiteKing, White, game)
+
+	whiteKingIdx := fastPosToIdx(game.WhiteKing)
+	blackKingIdx := fastPosToIdx(game.BlackKing)
+
+
+	whiteKingZoneIndices := getKingZoneIndices(whiteKingIdx)
+	whitePawnShield := countPawnShield(whiteKingIdx, White, game)
 	whiteAttackers := countKingZoneAttackers(game.WhiteKing, Black, game)
-	whiteDefenders := countDefenders(whiteKingZone, White, game)
+	whiteDefenders := countDefenders(whiteKingZoneIndices, White, game)
 
 	whiteKingSafety := whitePawnShield * pawnShieldBonus
 	whiteKingSafety -= whiteAttackers * kingAttackerPenalty
@@ -447,10 +480,11 @@ func evaluateKingSafety(game *Game) int {
 		whiteKingSafety -= openFileNearKingPen
 	}
 
-	blackKingZone := getKingZone(game.BlackKing)
-	blackPawnShield := countPawnShield(game.BlackKing, Black, game)
+
+	blackKingZoneIndices := getKingZoneIndices(blackKingIdx)
+	blackPawnShield := countPawnShield(blackKingIdx, Black, game)
 	blackAttackers := countKingZoneAttackers(game.BlackKing, White, game)
-	blackDefenders := countDefenders(blackKingZone, Black, game)
+	blackDefenders := countDefenders(blackKingZoneIndices, Black, game)
 
 	blackKingSafety := blackPawnShield * pawnShieldBonus
 	blackKingSafety -= blackAttackers * kingAttackerPenalty
@@ -462,6 +496,10 @@ func evaluateKingSafety(game *Game) int {
 	}
 
 	score = whiteKingSafety - blackKingSafety
+
+
+	kingSafetyCache[cacheIdx] = kingSafetyCacheEntry{hash: game.Hash, score: score, valid: true}
+
 	return score
 }
 
@@ -473,15 +511,16 @@ func Evaluate(game *Game) int {
 			continue
 		}
 
-		value := pieceValues[piece.Type]
+		pt := piece.Type
+		value := pieceValues[pt]
 
 		centerBonus := (5 - centerDistance(piece.Position)) * 2
 
-		if piece.Type == Knight || piece.Type == Bishop {
+		if pt == Knight || pt == Bishop {
 			centerBonus *= 2
 		}
 
-		if piece.Type == Pawn {
+		if pt == Pawn {
 			if piece.Color == White {
 				advancement := 5 + piece.Position.Y
 				if advancement > 0 {
@@ -495,7 +534,7 @@ func Evaluate(game *Game) int {
 			}
 		}
 
-		if (piece.Type == Knight || piece.Type == Bishop) && piece.Moved {
+		if (pt == Knight || pt == Bishop) && piece.Moved {
 			value += 40
 		}
 
@@ -525,26 +564,26 @@ func EvaluateForSide(game *Game, color Color) int {
 	return score
 }
 
-// Global NNUE model - loaded once at startup
+
 var nnueModel *Model
 
 func init() {
-	model := LoadModel("models/prob-512-128-32-d4.json")
+	model := LoadModel("models/prob-blended-d2.json")
 	nnueModel = &model
 }
 
-// EvaluateNNUE returns evaluation in centipawns using the NNUE model
-// Positive = White advantage, Negative = Black advantage
+
+
 func EvaluateNNUE(game *Game) int {
 	stm, nstm := BoardToHalfKPFeaturesAlloc(game)
 	winProb := nnueModel.Predict(stm, nstm)
 
-	// Convert probability to centipawns
-	// 0.5 = 0cp, 1.0 = +1000cp, 0.0 = -1000cp (approximate)
-	// Using a sigmoid-inverse-like scaling
+
+
+
 	cp := int((winProb - 0.5) * 2000)
 
-	// From side-to-move perspective, convert to White's perspective
+
 	if game.Turn == Black {
 		cp = -cp
 	}
@@ -552,7 +591,7 @@ func EvaluateNNUE(game *Game) int {
 	return cp
 }
 
-// EvaluateNNUEForSide returns NNUE evaluation from the given color's perspective
+
 func EvaluateNNUEForSide(game *Game, color Color) int {
 	score := EvaluateNNUE(game)
 	if color == Black {
@@ -561,7 +600,7 @@ func EvaluateNNUEForSide(game *Game, color Color) int {
 	return score
 }
 
-// GetNNUEModel returns the global NNUE model for direct access (e.g., incremental updates)
+
 func GetNNUEModel() *Model {
 	return nnueModel
 }

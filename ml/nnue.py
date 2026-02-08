@@ -157,7 +157,7 @@ class NNUEProbability(torch.nn.Module):
     def __init__(self):
         super(NNUEProbability, self).__init__()
 
-        self.emb = torch.nn.EmbeddingBag(KING_SQUARES * PIECE_TYPES * PIECE_SQUARES * COLORS, 256)
+        self.emb = torch.nn.EmbeddingBag(KING_SQUARES * PIECE_TYPES * PIECE_SQUARES * COLORS, 256, mode="sum")
 
         self.layers = torch.nn.Sequential(
             torch.nn.Linear(512, 128),
@@ -180,11 +180,11 @@ class NNUEProbability(torch.nn.Module):
 
 def evaluate_probability(model, loader, device):
     model.eval()
-    criterion = torch.nn.BCELoss()
+    criterion = torch.nn.MSELoss()
 
     total_loss = 0.0
-    total_correct = 0
     total_samples = 0
+    total_abs_error = 0.0
 
     with torch.no_grad():
         for stm_ind, stm_off, nstm_ind, nstm_off, cp, outcome in loader:
@@ -198,16 +198,13 @@ def evaluate_probability(model, loader, device):
             loss = criterion(out, outcome)
 
             total_loss += loss.item() * len(outcome)
-
-            pred_rounded = torch.round(out * 2) / 2
-            correct = (pred_rounded == outcome).sum().item()
-            total_correct += correct
+            total_abs_error += torch.abs(out - outcome).sum().item()
             total_samples += len(outcome)
 
     avg_loss = total_loss / total_samples
-    accuracy = total_correct / total_samples
+    mae = total_abs_error / total_samples
 
-    return avg_loss, accuracy
+    return avg_loss, mae
 
 
 def evaluate_centipawn(model, loader, device, cp_scale=400.0, cp_clamp=1500):
@@ -251,7 +248,7 @@ def train_probability(
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = torch.nn.BCELoss()
+    criterion = torch.nn.MSELoss()
 
     for epoch in range(epochs):
         model.train()
@@ -280,8 +277,8 @@ def train_probability(
 
         avg_train_loss = total_loss / num_batches
 
-        val_loss, val_acc = evaluate_probability(model, val_loader, device)
-        print(f"Epoch {epoch+1} complete. Train loss: {avg_train_loss:.4f}, Val loss: {val_loss:.4f}, Val acc: {val_acc:.4f}")
+        val_loss, val_mae = evaluate_probability(model, val_loader, device)
+        print(f"Epoch {epoch+1} complete. Train MSE: {avg_train_loss:.4f}, Val MSE: {val_loss:.4f}, Val MAE: {val_mae:.4f}")
 
     return model
 
@@ -407,8 +404,8 @@ if __name__ == "__main__":
         model = NNUEProbability()
         train_probability(model, train_loader, val_loader, device, epochs=args.epochs, lr=args.lr)
 
-        test_loss, test_acc = evaluate_probability(model, test_loader, device)
-        print(f"\nTest set: Loss: {test_loss:.4f}, Accuracy: {test_acc:.4f}")
+        test_loss, test_mae = evaluate_probability(model, test_loader, device)
+        print(f"\nTest set: MSE: {test_loss:.4f}, MAE: {test_mae:.4f}")
     else:
         model = NNUECentipawn()
         train_centipawn(model, train_loader, val_loader, device, epochs=args.epochs, lr=args.lr)

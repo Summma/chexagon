@@ -24,7 +24,7 @@ const (
 	DirDownRight
 )
 
-var directionVectors = []Axis{
+var directionVectors = [6]Axis{
 	{0, 1, -1}, // UP
 	{0, -1, 1}, // DOWN
 	{-1, 1, 0}, // UP LEFT
@@ -144,12 +144,27 @@ func abs(n int) int {
 	return n
 }
 
+func inBoardSlow(p Position) bool {
+	radius := 5
+	ax, ay, az := p.X, p.Y, p.Z
+	if ax < 0 { ax = -ax }
+	if ay < 0 { ay = -ay }
+	if az < 0 { az = -az }
+	return ax <= radius && ay <= radius && az <= radius
+}
+
 func (p Position) InBoard() bool {
-	radius := 5 // Constant for all intents and purposes
-	return abs(p.X) <= radius && abs(p.Y) <= radius && abs(p.Z) <= radius
+	x := p.X + 5
+	y := p.Y + 5
+	if x < 0 || x > 10 || y < 0 || y > 10 {
+		return false
+	}
+	return inBoardTable[x][y]
 }
 
 var posToIdxTable [11][11]int
+
+var inBoardTable [11][11]bool
 
 func init() {
 	for i := 0; i < 11; i++ {
@@ -162,6 +177,7 @@ func init() {
 func InitPosToIdxTable() {
 	for pos, idx := range positionToIndex {
 		posToIdxTable[pos.X+5][pos.Y+5] = idx
+		inBoardTable[pos.X+5][pos.Y+5] = true
 	}
 }
 

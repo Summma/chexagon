@@ -8,24 +8,24 @@ import (
 	"os"
 )
 
-// Quantization scale for int16 weights
-const quantScale = 512.0 // Allows weights in range [-64, 64]
 
-// Weight holds a tensor's shape and flattened data
+const quantScale = 512.0
+
+
 type Weight struct {
 	Shape []int     `json:"shape"`
 	Data  []float32 `json:"data"`
 }
 
-// Model holds the NNUE weights in an optimized layout
+
 type Model struct {
 	ModelType string
 
-	// Quantized embedding weights (int16 for memory/cache efficiency)
+
 	EmbWeightQ []int16
 	EmbDim     int
 
-	// Keep linear layers as float32 (small, not the bottleneck)
+
 	Layer0Weight []float32
 	Layer0Bias   []float32
 	Layer0Out    int
@@ -35,28 +35,28 @@ type Model struct {
 	Layer4Weight []float32
 	Layer4Bias   []float32
 
-	// Pre-allocated buffers for inference
+
 	bufConcat []float32
 	bufL0     []float32
 	bufL2     []float32
 	bufL4     []float32
 }
 
-// NNUEAccumulator holds the incrementally-updated embedding sums
+
 type NNUEAccumulator struct {
-	// Accumulated embeddings for white and black king perspectives
+
 	White []int32
 	Black []int32
 
-	// Track validity - if king moves, we need full refresh
+
 	Valid bool
 
-	// Cache king positions to detect when refresh is needed
+
 	WhiteKingIdx int
 	BlackKingIdx int
 }
 
-// NewAccumulator creates a new accumulator for the given embedding dimension
+
 func NewAccumulator(dim int) *NNUEAccumulator {
 	return &NNUEAccumulator{
 		White: make([]int32, dim),
@@ -65,12 +65,12 @@ func NewAccumulator(dim int) *NNUEAccumulator {
 	}
 }
 
-// GetEmbDim returns the embedding dimension
+
 func (m *Model) GetEmbDim() int {
 	return m.EmbDim
 }
 
-// Copy creates a copy of the accumulator (for search stack)
+
 func (a *NNUEAccumulator) Copy(dim int) *NNUEAccumulator {
 	cp := &NNUEAccumulator{
 		White:        make([]int32, dim),
@@ -100,7 +100,7 @@ func LoadModel(path string) Model {
 		log.Fatalf("Failed to unmarshal json data: %v", err)
 	}
 
-	// Extract weights
+
 	emb := raw.Weights["emb.weight"]
 	l0w := raw.Weights["layers.0.weight"]
 	l0b := raw.Weights["layers.0.bias"]
@@ -109,7 +109,7 @@ func LoadModel(path string) Model {
 	l4w := raw.Weights["layers.4.weight"]
 	l4b := raw.Weights["layers.4.bias"]
 
-	// Quantize embedding weights to int16
+
 	embQ := make([]int16, len(emb.Data))
 	for i, v := range emb.Data {
 		q := int32(v * quantScale)
@@ -148,11 +148,11 @@ func LoadModel(path string) Model {
 	return model
 }
 
-// RefreshAccumulator computes the accumulator from scratch
+
 func (m *Model) RefreshAccumulator(acc *NNUEAccumulator, game *Game) {
 	emb := m.EmbWeightQ
 
-	// Find king indices
+
 	whiteKingIdx := 0
 	blackKingIdx := 0
 	for idx, piece := range game.Board {
@@ -165,7 +165,7 @@ func (m *Model) RefreshAccumulator(acc *NNUEAccumulator, game *Game) {
 		}
 	}
 
-	// Clear accumulators (unrolled)
+
 	for i := 0; i < 256; i += 8 {
 		acc.White[i] = 0
 		acc.White[i+1] = 0
@@ -188,7 +188,7 @@ func (m *Model) RefreshAccumulator(acc *NNUEAccumulator, game *Game) {
 	whiteBase := whiteKingIdx * PiecesPerKing
 	blackBase := blackKingIdx * PiecesPerKing
 
-	// Accumulate all non-king pieces
+
 	for idx, piece := range game.Board {
 		if piece == nil || piece.Type == King {
 			continue
@@ -206,7 +206,7 @@ func (m *Model) RefreshAccumulator(acc *NNUEAccumulator, game *Game) {
 
 		pieceIdx := pieceType*(NumColors*NumSquares) + colorNum*NumSquares + idx
 
-		// Add to white king's perspective
+
 		whiteFeat := whiteBase + pieceIdx
 		whiteRow := emb[whiteFeat*256 : (whiteFeat+1)*256]
 		for i := 0; i < 256; i += 8 {
@@ -220,7 +220,7 @@ func (m *Model) RefreshAccumulator(acc *NNUEAccumulator, game *Game) {
 			acc.White[i+7] += int32(whiteRow[i+7])
 		}
 
-		// Add to black king's perspective
+
 		blackFeat := blackBase + pieceIdx
 		blackRow := emb[blackFeat*256 : (blackFeat+1)*256]
 		for i := 0; i < 256; i += 8 {
@@ -240,10 +240,10 @@ func (m *Model) RefreshAccumulator(acc *NNUEAccumulator, game *Game) {
 	acc.Valid = true
 }
 
-// UpdateAccumulator incrementally updates for a move
-// Returns false if a full refresh is needed (king moved)
+
+
 func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Piece, game *Game) bool {
-	// If king moved, need full refresh
+
 	if move.PieceType == King {
 		return false
 	}
@@ -261,16 +261,16 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 	fromIdx := PositionToIndex(move.From)
 	toIdx := PositionToIndex(move.To)
 
-	// Subtract piece from old position
+
 	oldPieceIdx := pieceType*(NumColors*NumSquares) + colorNum*NumSquares + fromIdx
 	oldWhiteFeat := whiteBase + oldPieceIdx
 	oldBlackFeat := blackBase + oldPieceIdx
 
-	// Get slices for better bounds check elimination
+
 	oldWhiteRow := emb[oldWhiteFeat*256 : (oldWhiteFeat+1)*256]
 	oldBlackRow := emb[oldBlackFeat*256 : (oldBlackFeat+1)*256]
 
-	// Unrolled subtract from white perspective
+
 	for i := 0; i < 256; i += 8 {
 		acc.White[i] -= int32(oldWhiteRow[i])
 		acc.White[i+1] -= int32(oldWhiteRow[i+1])
@@ -281,7 +281,7 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 		acc.White[i+6] -= int32(oldWhiteRow[i+6])
 		acc.White[i+7] -= int32(oldWhiteRow[i+7])
 	}
-	// Unrolled subtract from black perspective
+
 	for i := 0; i < 256; i += 8 {
 		acc.Black[i] -= int32(oldBlackRow[i])
 		acc.Black[i+1] -= int32(oldBlackRow[i+1])
@@ -293,7 +293,7 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 		acc.Black[i+7] -= int32(oldBlackRow[i+7])
 	}
 
-	// Add piece to new position (handle promotion)
+
 	newPieceType := pieceType
 	if move.IsPromotion && move.PromotionType != nil {
 		newPieceType = int(*move.PromotionType)
@@ -306,7 +306,7 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 	newWhiteRow := emb[newWhiteFeat*256 : (newWhiteFeat+1)*256]
 	newBlackRow := emb[newBlackFeat*256 : (newBlackFeat+1)*256]
 
-	// Unrolled add to white perspective
+
 	for i := 0; i < 256; i += 8 {
 		acc.White[i] += int32(newWhiteRow[i])
 		acc.White[i+1] += int32(newWhiteRow[i+1])
@@ -317,7 +317,7 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 		acc.White[i+6] += int32(newWhiteRow[i+6])
 		acc.White[i+7] += int32(newWhiteRow[i+7])
 	}
-	// Unrolled add to black perspective
+
 	for i := 0; i < 256; i += 8 {
 		acc.Black[i] += int32(newBlackRow[i])
 		acc.Black[i+1] += int32(newBlackRow[i+1])
@@ -329,7 +329,7 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 		acc.Black[i+7] += int32(newBlackRow[i+7])
 	}
 
-	// Remove captured piece if any
+
 	if captured != nil {
 		capType := int(captured.Type)
 		capColor := 0
@@ -370,13 +370,13 @@ func (m *Model) UpdateAccumulator(acc *NNUEAccumulator, move Move, captured *Pie
 	return true
 }
 
-// PredictWithAccumulator runs inference using pre-computed accumulator
+
 func (m *Model) PredictWithAccumulator(acc *NNUEAccumulator, turn Color) float32 {
 	invScale := float32(1.0 / quantScale)
 	concat := m.bufConcat
 
-	// Select perspective based on side to move and dequantize
-	// Unroll by 8 for 256-dim embedding
+
+
 	if turn == White {
 		for i := 0; i < 256; i += 8 {
 			concat[i] = float32(acc.White[i]) * invScale
@@ -417,28 +417,28 @@ func (m *Model) PredictWithAccumulator(acc *NNUEAccumulator, turn Color) float32
 		}
 	}
 
-	// Layer 0: 512 -> 128, Linear + ClampedReLU
+
 	m.linear512to128CReLU(concat, m.Layer0Weight, m.Layer0Bias, m.bufL0)
 
-	// Layer 2: 128 -> 32, Linear + ClampedReLU
+
 	m.linear128to32CReLU(m.bufL0, m.Layer2Weight, m.Layer2Bias, m.bufL2)
 
-	// Layer 4: 32 -> 1, Linear + Sigmoid
+
 	m.linear32to1Sigmoid(m.bufL2, m.Layer4Weight, m.Layer4Bias, m.bufL4)
 
 	return m.bufL4[0]
 }
 
-// Predict runs inference from scratch (non-incremental, for compatibility)
+
 func (m *Model) Predict(ourFeatures, theirFeatures []int) float32 {
 	dim := m.EmbDim
 	emb := m.EmbWeightQ
 
-	// Temporary accumulators
+
 	buf0 := make([]int32, dim)
 	buf1 := make([]int32, dim)
 
-	// Embedding bag for our features
+
 	for _, feat := range ourFeatures {
 		offset := feat * dim
 		for i := 0; i < dim; i++ {
@@ -446,7 +446,7 @@ func (m *Model) Predict(ourFeatures, theirFeatures []int) float32 {
 		}
 	}
 
-	// Embedding bag for their features
+
 	for _, feat := range theirFeatures {
 		offset := feat * dim
 		for i := 0; i < dim; i++ {
@@ -454,7 +454,7 @@ func (m *Model) Predict(ourFeatures, theirFeatures []int) float32 {
 		}
 	}
 
-	// Dequantize and concatenate
+
 	invScale := float32(1.0 / quantScale)
 	concat := m.bufConcat
 	for i := 0; i < dim; i++ {
@@ -462,22 +462,22 @@ func (m *Model) Predict(ourFeatures, theirFeatures []int) float32 {
 		concat[dim+i] = float32(buf1[i]) * invScale
 	}
 
-	// Layer 0: Linear + ClampedReLU
+
 	m.linearCReLU(concat, m.Layer0Weight, m.Layer0Bias, m.bufL0, 512, m.Layer0Out)
 
-	// Layer 2: Linear + ClampedReLU
+
 	m.linearCReLU(m.bufL0, m.Layer2Weight, m.Layer2Bias, m.bufL2, m.Layer0Out, m.Layer2Out)
 
-	// Layer 4: Linear + Sigmoid
+
 	m.linearSigmoid(m.bufL2, m.Layer4Weight, m.Layer4Bias, m.bufL4, m.Layer2Out, 1)
 
 	return m.bufL4[0]
 }
 
-// linear512to128CReLU computes 128 outputs from 512 inputs with clamp(0,1)
-// Heavily optimized for this specific size with 4-way ILP
+
+
 func (m *Model) linear512to128CReLU(x, weight, bias, out []float32) {
-	// Process 4 output neurons at once to improve ILP
+
 	for i := 0; i < 128; i += 4 {
 		sum0 := bias[i]
 		sum1 := bias[i+1]
@@ -489,7 +489,7 @@ func (m *Model) linear512to128CReLU(x, weight, bias, out []float32) {
 		row2 := weight[(i+2)*512 : (i+3)*512]
 		row3 := weight[(i+3)*512 : (i+4)*512]
 
-		// Process all 512 inputs
+
 		for j := 0; j < 512; j += 8 {
 			xj0 := x[j]
 			xj1 := x[j+1]
@@ -513,7 +513,7 @@ func (m *Model) linear512to128CReLU(x, weight, bias, out []float32) {
 			sum3 += row3[j+4]*xj4 + row3[j+5]*xj5 + row3[j+6]*xj6 + row3[j+7]*xj7
 		}
 
-		// Clamp to [0, 1]
+
 		if sum0 < 0 {
 			sum0 = 0
 		} else if sum0 > 1 {
@@ -542,8 +542,8 @@ func (m *Model) linear512to128CReLU(x, weight, bias, out []float32) {
 	}
 }
 
-// linear128to32CReLU computes 32 outputs from 128 inputs with clamp(0,1)
-// Optimized with 4-way ILP
+
+
 func (m *Model) linear128to32CReLU(x, weight, bias, out []float32) {
 	for i := 0; i < 32; i += 4 {
 		sum0 := bias[i]
@@ -579,7 +579,7 @@ func (m *Model) linear128to32CReLU(x, weight, bias, out []float32) {
 			sum3 += row3[j+4]*xj4 + row3[j+5]*xj5 + row3[j+6]*xj6 + row3[j+7]*xj7
 		}
 
-		// Clamp to [0, 1]
+
 		if sum0 < 0 {
 			sum0 = 0
 		} else if sum0 > 1 {
@@ -608,10 +608,10 @@ func (m *Model) linear128to32CReLU(x, weight, bias, out []float32) {
 	}
 }
 
-// linear32to1Sigmoid computes 1 output from 32 inputs with sigmoid
+
 func (m *Model) linear32to1Sigmoid(x, weight, bias, out []float32) {
 	sum := bias[0]
-	// Fully unrolled 32 elements
+
 	sum += weight[0] * x[0]
 	sum += weight[1] * x[1]
 	sum += weight[2] * x[2]
@@ -648,18 +648,18 @@ func (m *Model) linear32to1Sigmoid(x, weight, bias, out []float32) {
 	out[0] = fastSigmoid(sum)
 }
 
-// fastSigmoid uses a fast rational approximation of sigmoid
-// Accurate to ~0.002 for x in [-8, 8]
+
+
 func fastSigmoid(x float32) float32 {
-	// Clamp to avoid extreme values
+
 	if x < -8 {
 		return 0.0003
 	}
 	if x > 8 {
 		return 0.9997
 	}
-	// Fast approximation: sigmoid(x) ≈ 0.5 + x / (4 + 2*|x| + x*x)
-	// This is a rational approximation that's quite accurate
+
+
 	ax := x
 	if ax < 0 {
 		ax = -ax
@@ -667,14 +667,14 @@ func fastSigmoid(x float32) float32 {
 	return 0.5 + x/(4.0+2.0*ax+x*x)
 }
 
-// linearCReLU computes out = clamp(W @ x + b, 0, 1) - generic version
-// Optimized with loop unrolling (8x)
+
+
 func (m *Model) linearCReLU(x, weight, bias, out []float32, inDim, outDim int) {
 	for i := 0; i < outDim; i++ {
 		sum := bias[i]
 		rowOffset := i * inDim
 
-		// Process 8 elements at a time
+
 		j := 0
 		for ; j <= inDim-8; j += 8 {
 			sum += weight[rowOffset+j] * x[j]
@@ -686,12 +686,12 @@ func (m *Model) linearCReLU(x, weight, bias, out []float32, inDim, outDim int) {
 			sum += weight[rowOffset+j+6] * x[j+6]
 			sum += weight[rowOffset+j+7] * x[j+7]
 		}
-		// Handle remainder
+
 		for ; j < inDim; j++ {
 			sum += weight[rowOffset+j] * x[j]
 		}
 
-		// Clamp to [0, 1]
+
 		if sum < 0 {
 			sum = 0
 		} else if sum > 1 {
@@ -701,7 +701,7 @@ func (m *Model) linearCReLU(x, weight, bias, out []float32, inDim, outDim int) {
 	}
 }
 
-// linearSigmoid computes out = sigmoid(W @ x + b)
+
 func (m *Model) linearSigmoid(x, weight, bias, out []float32, inDim, outDim int) {
 	for i := 0; i < outDim; i++ {
 		sum := bias[i]
@@ -713,15 +713,15 @@ func (m *Model) linearSigmoid(x, weight, bias, out []float32, inDim, outDim int)
 	}
 }
 
-// HalfKP feature constants
+
 const (
 	NumSquares    = 91
-	NumPieceTypes = 5 // P, N, B, R, Q (no king)
+	NumPieceTypes = 5
 	NumColors     = 2
-	PiecesPerKing = NumPieceTypes * NumColors * NumSquares // 910
+	PiecesPerKing = NumPieceTypes * NumColors * NumSquares
 )
 
-// BoardToHalfKPFeatures converts a game board to HalfKP feature indices (non-incremental)
+
 func BoardToHalfKPFeatures(game *Game, stmBuf, nstmBuf []int) ([]int, []int) {
 	whiteKingIdx := 0
 	blackKingIdx := 0
@@ -773,13 +773,13 @@ func BoardToHalfKPFeatures(game *Game, stmBuf, nstmBuf []int) ([]int, []int) {
 	return stmBuf, nstmBuf
 }
 
-// Pre-allocated feature buffers for the global evaluator
+
 var (
 	featureBufSTM  = make([]int, 0, 32)
 	featureBufNSTM = make([]int, 0, 32)
 )
 
-// BoardToHalfKPFeaturesAlloc is the allocating version for external use
+
 func BoardToHalfKPFeaturesAlloc(game *Game) ([]int, []int) {
 	return BoardToHalfKPFeatures(game, featureBufSTM, featureBufNSTM)
 }

@@ -27,7 +27,8 @@ func init() {
 			s := -q - r
 			if s >= -5 && s <= 5 {
 				pos := Position{q, r, s}
-				if pos.InBoard() {
+
+				if inBoardSlow(pos) {
 					positionToIndex[pos] = idx
 					indexToPosition = append(indexToPosition, pos)
 					idx++
@@ -51,6 +52,9 @@ func init() {
 	}
 
 	InitPosToIdxTable()
+
+
+	initAttackTables()
 }
 
 func (g *Game) ComputeHash() uint64 {
